@@ -1,0 +1,14 @@
+[2] Memory: SYS0 Bootstrapping :   10 : 2026-01-29  01:58:25                    
+================================================================================
+Running: SYS0: initialized                                       3.966 ms [PASS]
+Running: SYS0: memory alignment check                            1.596 ms [PASS]
+Running: SYS0: init single free block                            1.699 ms [PASS]
+Running: SYS0: scope initialized                                 1.436 ms [PASS]
+Running: SYS0: scope reclaiming policy                           1.482 ms [PASS]
+Running: SYS0: scope protected & pinned                          1.479 ms [PASS]
+Running: SYS0: basic allocation                                  1.572 ms [PASS]
+Running: SYS0: zero size alloc -> NULL                           1.496 ms [PASS]
+Running: SYS0: alloc leaves free block                           1.511 ms [PASS]
+Running: SYS0: slab slot allocation                              2.669 ms [PASS]
+================================================================================
+[2]     TESTS= 10        PASS= 10        FAIL=  0        SKIP=  0
