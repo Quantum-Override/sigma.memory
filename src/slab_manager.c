@@ -74,11 +74,11 @@ addr slab_manager_get_slab_slot(usize slot_index) {
     if (slab_slots == NULL || slot_index >= 16) {
         return ADDR_EMPTY;
     }
-    void *value;
-    if (SlotArray.get_at(slab_slots, slot_index, &value) != OK) {
+    addr value;
+    if (PArray.get((parray)&slab_array, slot_index, &value) != OK) {
         return ADDR_EMPTY;
     }
-    return (addr)value;
+    return value;
 }
 bool slab_manager_set_slab_slot(usize slot_index, addr value) {
     if (slab_slots == NULL || slot_index >= 16) {

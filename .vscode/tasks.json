@@ -44,7 +44,7 @@
         {
             "label": "build active test",
             "type": "shell",
-            "command": "gcc -g -DTEST_BOOTSTRAP_ONLY -c src/memory.c -o build/memory.o -Iinclude && gcc -g -DTEST_BOOTSTRAP_ONLY -o build/test/${fileBasenameNoExtension} test/${fileBasename} build/memory.o -Iinclude -I/usr/include -lstest",
+            "command": "gcc -g -c src/memory.c -o build/memory.o -Iinclude && gcc -g -o build/test/${fileBasenameNoExtension} test/${fileBasename} build/memory.o -Iinclude -I/usr/include -lstest",
             "group": "build",
             "problemMatcher": [
                 "$gcc"

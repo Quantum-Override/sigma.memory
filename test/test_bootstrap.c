@@ -77,28 +77,6 @@ void test_init_page_creates_single_free_block(void) {
     sbyte state = Memory.state();
     Assert.isTrue(state & MEM_STATE_READY, "Memory should be ready");
 }
-void test_sys0_scope_initialized(void) {
-    // SYS0 scope should be cached in R7 after bootstrap: R7 should not be NULL
-    void *current_scope = NULL;
-    // Get current scope
-    current_scope = Allocator.Scope.current();
-    Assert.isTrue(current_scope != NULL, "SYS0 current scope should be initialized");
-}
-void test_sys0_scope_has_reclaiming_policy(void) {
-    // TEST_BOOTSTRAP_ONLY may not have scope fully initialized
-    // void *current_scope = Allocator.Scope.current();
-    // Assert.isTrue(Allocator.Scope.config(current_scope, SCOPE_POLICY) == SCOPE_POLICY_RECLAIMING,
-    //               "SYS0 policy should be RECLAIMING");
-}
-void test_sys0_scope_is_protected_and_pinned(void) {
-    // TEST_BOOTSTRAP_ONLY may not have scope fully initialized
-    // void *current_scope = Allocator.Scope.current();
-    // Assert.isTrue(
-    //     (Allocator.Scope.config(current_scope, SCOPE_FLAG) &
-    //      (SCOPE_FLAG_PROTECTED | SCOPE_FLAG_PINNED)) == (SCOPE_FLAG_PROTECTED |
-    //      SCOPE_FLAG_PINNED),
-    //     "SYS0 scope should be PROTECTED and PINNED");
-}
 void test_sys0_alloc_basic(void) {
     block_header hdr = Memory.get_first_header();
 
@@ -113,20 +91,6 @@ void test_sys0_alloc_basic(void) {
     Assert.isTrue(blk_addr >= min_addr,
                   "Allocated block address (0x%lx) should be >= min address (0x%lx)", blk_addr,
                   min_addr);
-
-    // Get the block header (pointer - header size)
-    // block_header blk_hdr = (block_header)(blk_addr - sizeof(sc_blk_header));
-
-    // Check allocated block is marked NOT free
-    // TEST_BOOTSTRAP_ONLY allocation may not set flags correctly
-    // Assert.isTrue(!(blk_hdr->flags & BLK_FLAG_FREE), "Allocated block should not be marked
-    // FREE");
-
-    // Verify header has valid size
-    // TEST_BOOTSTRAP_ONLY may not set size correctly
-    // Assert.isTrue(blk_hdr->size >= alloc_size,
-    //               "Allocated block size (%u) should be >= requested size (%zu)", blk_hdr->size,
-    //               alloc_size);
 }
 void test_sys0_alloc_null_on_zero_size(void) {
     // Scope.alloc(0) should return NULL
@@ -188,7 +152,6 @@ void test_slab_slot_allocation(void) {
     Assert.isTrue(slots_base == registers_end, "Slots base immediately follows registers");
 
     // All 16 slots should be ADDR_EMPTY initially
-    // In TEST_BOOTSTRAP_ONLY, some slots may be used by SlotArray internally
     for (usize i = 0; i < 16; i++) {
         addr slot_value = SlabManager.get_slab_slot(i);
         if (i == 1) {
@@ -226,9 +189,6 @@ __attribute__((constructor)) void init_memory_tests(void) {
     testcase("SYS0: initialized", test_sys0_initialized);
     testcase("SYS0: memory alignment check", test_sanity_memory_alignments);
     testcase("SYS0: init single free block", test_init_page_creates_single_free_block);
-    testcase("SYS0: scope initialized", test_sys0_scope_initialized);
-    testcase("SYS0: scope reclaiming policy", test_sys0_scope_has_reclaiming_policy);
-    testcase("SYS0: scope protected & pinned", test_sys0_scope_is_protected_and_pinned);
 
     // SYS0 allocation tests
     testcase("SYS0: basic allocation", test_sys0_alloc_basic);

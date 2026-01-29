@@ -65,7 +65,6 @@ declare -A TEST_CONFIGS=()
 # Flags will be prefixed with -D automatically
 # See BUILDING.md for option details
 declare -A TEST_COMPILE_FLAGS=(
-    ["bootstrap"]="TEST_BOOTSTRAP_ONLY"
 )
 
 # License copyright header for generated files

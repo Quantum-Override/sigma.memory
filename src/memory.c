@@ -31,6 +31,7 @@
 // ----------------
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 
 // Register indices
@@ -604,9 +605,14 @@ const sc_memory_i Memory = {
 // Helper to initialize scope_table[0] for SYS0
 static void init_scope_table_sys0(void) {
     scope sys0_entry = &scope_table[0];
+    // Zero the scope entry to ensure clean initialization
+    memset(sys0_entry, 0, sizeof(sc_scope));
     sys0_entry->scope_id = 0;
     sys0_entry->policy = SCOPE_POLICY_RECLAIMING;
     sys0_entry->flags = SCOPE_FLAG_PROTECTED | SCOPE_FLAG_PINNED;
+    // Set flags individually to ensure they stick
+    sys0_entry->flags |= SCOPE_FLAG_PROTECTED;
+    sys0_entry->flags |= SCOPE_FLAG_PINNED;
     sys0_entry->first_page_off = 0;    // SYS0 page base
     sys0_entry->current_page_off = 0;  // Only one page
     sys0_entry->page_count = 1;
@@ -670,7 +676,6 @@ __attribute__((constructor)) void init_memory_system(void) {
         abort();
     }
 
-#ifndef TEST_BOOTSTRAP_ONLY
     // Initialize scope_table[1] for SLB0
     scope slb0 = &scope_table[1];
     slb0->scope_id = 1;
@@ -729,12 +734,9 @@ __attribute__((constructor)) void init_memory_system(void) {
     // Set R7 to point to SLB0 (make it the current scope)
     memory_set_current_scope(slb0);
 
-#elifdef TEST_BOOTSTRAP_ONLY
-    printf("Memory system initialized in TEST_BOOTSTRAP_ONLY mode\n");
-#endif
+    //
 }
 __attribute__((destructor)) void shutdown_memory_system(void) {
-#ifndef TEST_BOOTSTRAP_ONLY
     // Release SLB0 pages back to OS
     scope slb0 = get_scope_table_entry(1);
     if (slb0 != NULL && slb0->first_page_off != 0) {
@@ -751,7 +753,6 @@ __attribute__((destructor)) void shutdown_memory_system(void) {
         slb0->page_count = 0;
         SlabManager.set_slab_slot(1, ADDR_EMPTY);
     }
-#endif
     // SYS0 is static - no cleanup needed
     sys0 = NULL;
 }

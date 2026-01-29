@@ -1,7 +1,49 @@
 # SigmaCore Memory - Roadmap
 
-**Current Version:** 0.1.0  
+
+**Current Version:** 0.2.0 (in development)
 **Last Updated:** January 29, 2026
+
+---
+
+## v0.2.0 Implementation Plan (Final)
+
+### Features
+
+1. **Free Block Size Tracking**
+     - Add a `size` field to the free block struct.
+     - Minimum allocation size for SLB0 is now `sizeof(free_block)` (with alignment).
+     - Update allocation/free-list logic to use this new size.
+     - **Testing:**
+         - New test set: `test/test_slab0_v2.c`.
+         - Tests for splitting, reuse, and minimum allocation size.
+         - Only update `test_slab0` if directly affected.
+
+2. **sys0_dispose Coalescing**
+     - On disposal, merge adjacent free blocks.
+     - Update headers/footers as needed.
+     - **Testing:**
+         - New test set: `test/test_sys0_v2.c`.
+         - Tests for coalescing two or more blocks, edge cases.
+         - Only update existing tests if invariants change.
+
+3. **SLB0 Frame Support**
+     - Add a single frame struct to `sc_scope` (no nesting for SLB0).
+     - On `begin_frame`, save bump pointer/allocation state for the slab.
+     - On `end_frame`, restore state, bulk-reclaiming allocations since frame start.
+     - Assert/error if nested frames attempted.
+     - **Testing:**
+         - New test set: `test/test_slab0_frame.c`.
+         - Tests for correct frame semantics, error on nesting, free list interaction.
+
+### Design Notes
+
+- Frame tracking is embedded in `sc_scope` (allocated in SYS0, not user memory).
+- For future arenas, frame stack can be added to `sc_scope` (with max depth).
+- SLB0 MVP: single frame only, no nesting.
+- All new features are tested in versioned, isolated test sets.
+
+---
 
 ---
 

@@ -316,13 +316,21 @@ enum {
 9. Set R7 = &scope_table[0] (current scope)
 10. Initialize SlabManager (slab_slots wrapper)
 
-#ifndef TEST_BOOTSTRAP_ONLY
 11. Initialize scope_table[1] for SLB0
 12. Allocate 16 pages via mmap (64KB)
 13. Initialize page sentinels and link chain
 14. Set slab_slots[1] = SLB0 page-0 address
 15. Set R7 = &scope_table[1] (SLB0 is current)
 #endif
+
+~~#ifndef TEST_BOOTSTRAP_ONLY~~
+~~11. Initialize scope_table[1] for SLB0~~
+~~12. Allocate 16 pages via mmap (64KB)~~
+~~13. Initialize page sentinels and link chain~~
+~~14. Set slab_slots[1] = SLB0 page-0 address~~
+~~15. Set R7 = &scope_table[1] (SLB0 is current)~~
+~~#endif~~
+*The TEST_BOOTSTRAP_ONLY conditional is no longer present; SLB0/user memory system is always initialized.*
 ```
 
 ---
