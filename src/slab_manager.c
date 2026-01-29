@@ -29,6 +29,7 @@
 // ----------------
 #include <sigma.collections/parray.h>
 #include <sigma.collections/slotarray.h>
+#include <string.h>
 
 // define slab slot base parray
 // declare the Slab PointerArray struct
@@ -56,6 +57,9 @@ bool slab_manager_init_slab_array(void) {
     slab_array.bucket = (addr *)Memory.get_slots_base();
     slab_array.end = Memory.get_slots_end();
 
+    // zero the slots memory to ensure all slots start as ADDR_EMPTY
+    memset(slab_array.bucket, 0, SYS0_SLOTS_SIZE);
+
     // is there validation here?
     slab_slots = init_slab_slot_array((parray)&slab_array);
     if (slab_slots == NULL) {
@@ -70,11 +74,11 @@ addr slab_manager_get_slab_slot(usize slot_index) {
     if (slab_slots == NULL || slot_index >= 16) {
         return ADDR_EMPTY;
     }
-    addr value;
-    if (PArray.get((parray)&slab_array, slot_index, &value) != OK) {
+    void *value;
+    if (SlotArray.get_at(slab_slots, slot_index, &value) != OK) {
         return ADDR_EMPTY;
     }
-    return value;
+    return (addr)value;
 }
 bool slab_manager_set_slab_slot(usize slot_index, addr value) {
     if (slab_slots == NULL || slot_index >= 16) {
