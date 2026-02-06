@@ -1,231 +1,484 @@
-# SigmaCore Memory Management System - Design Document v1.0
+# SigmaCore Memory Management System - Design Document v2.0
 
 **Author:** SigmaCore Development Team  
-**Date:** January 20, 2026  
-**Status:** Design Complete, Ready for Implementation  
-**Version:** 1.0
+**Date:** February 6, 2026  
+**Status:** Architecture Redesign - B-Tree External Metadata  
+**Version:** 2.0  
+**Based on:** v0.1.0 (clean bootstrap baseline)
 
 ---
 
 ## 1. Executive Summary
 
-The SigmaCore memory management system implements a **dual-allocator architecture** designed for deterministic, real-time-safe operation:
+The SigmaCore memory management system implements a **metadata-external architecture** with B-Tree allocation tracking, designed for OS-level memory management:
 
-- **SYS0**: Bootstrap allocator (4K page) for system objects with reclaiming allocation strategy
-- **SLB0**: Default user-space allocator using bump allocation (**Policy**: `DYNAMIC`; **Flags**: `SECURE`)
-- **SLBn**: Additional user-space arena allocators using bump allocation; set policy and flags on creation
+- **SYS0**: Bootstrap allocator (8KB page) for system metadata with reclaiming allocation strategy
+- **NodePool**: Separate 16KB pool (1024 nodes) for B-Tree allocation metadata
+- **SLB0-SLB14**: User-space allocators (15 slabs total) with policy-driven strategies
+  - **POLICY_RECLAIMING**: B-Tree tracked, coalescing, free/reuse support
+  - **POLICY_BUMP**: Simple bump allocation, no per-allocation overhead
+  - **POLICY_FIXED**: Pre-allocated, bounded memory
+
+### Key Architectural Innovations
+
+**100% Page Utilization:**
+- User pages contain **zero** metadata (no sentinels, headers, bitmaps)
+- All allocation metadata stored externally in B-Tree nodes
+- Pages are pure payload - true OS-level memory model
+
+**Per-Slab B-Trees:**
+- Each RECLAIMING slab has independent BST root
+- NodeTable[15] stores root indices into NodePool
+- Selective complexity: only slabs needing free/reuse use B-Trees
+
+**Scalable Node Management:**
+- Fixed 16KB NodePool (1024 × 16-byte nodes)
+- Cached in R1 register for fast access
+- Growth via remap (transparent to all code)
 
 This design enables:
-- ✅ Deterministic allocation/deallocation (no fragmentation in user space)
-- ✅ Bulk deallocation via frame nesting (begin/end checkpoints)
-- ✅ Policy-driven allocation (fixed arenas vs. dynamic growth)
-- ✅ Cross-scope isolation with explicit move/copy semantics
-- ✅ Real-time safety through compile-time and runtime invariants
+- ✅ Zero per-allocation overhead (metadata-external)
+- ✅ Full page reclamation with O(log n) operations
+- ✅ OS-aligned architecture (matches jemalloc/tcmalloc model)
+- ✅ Policy-driven strategies (reclaiming vs deterministic bump)
+- ✅ Scalable to large address spaces
 
 ---
 
 ## 2. Architecture Overview
 
-### 2.1 Dual Allocator Model
+### 2.1 Metadata-External Model
 
 ```
-┌─────────────────────────────────────────┐
-│         User Application                │
-└────────────┬────────────────────────────┘
-             │ Allocator.alloc() on current scope
-             │ Allocator.Scope.alloc(scope) for explicit scope
-             ↓
-┌─────────────────────────────────────────┐
-│     Scopes (General Interface)          │  ← Polymorphic contexts
-│                                         │     - Scopes: SYS0, SLB0, Custom Arenas
-│  [Allocator.Scope operations]           │     - Frames: Nested checkpoints within Arena
-└────────────┬────────────────────────────┘
-             │ (polymorphic dispatch via function pointers)
-             ↓
-┌────────────────────────────────────────────────────────────┐
-│              Scope Implementations                         │
-│                                                            │
-│  SYS0 Scope (Reclaiming)          Arena Scopes (Bump)      │
-│  ├─ alloc_fn = sys0_alloc         ├─ Arena.create()        │
-│  ├─ dispose_fn = sys0_dispose     ├─ Arena.destroy()       │
-│  └─ [Registers] [Metadata]        ├─ Arena.reset()         │
-│                                   ├─ Arena.begin_frame()   │
-│                      SLB0 Arena    ├─ Arena.end_frame()    │
-│                      (DYNAMIC)     └─ Frame (nested scope) │
-│                                      - Checkpoint for      │
-│                                        bulk deallocation   │
-└────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    User Application                         │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ Allocator.alloc() / dispose()
+                       ↓
+┌─────────────────────────────────────────────────────────────┐
+│                 Scope Interface                             │
+│  - SYS0 (system metadata)                                   │
+│  - SLB0-SLB14 (user slabs, 15 total)                        │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ Policy dispatch
+                       ↓
+┌──────────────────────┴──────────────────────────────────────┐
+│                                                              │
+│  RECLAIMING Strategy          BUMP Strategy                 │
+│  ┌─────────────────┐          ┌──────────────────┐          │
+│  │ B-Tree Tracking │          │ Simple Bump Ptr  │          │
+│  │ - search/insert │          │ - No metadata    │          │
+│  │ - coalesce      │          │ - Deterministic  │          │
+│  │ - page release  │          │ - Frame-based    │          │
+│  └────────┬────────┘          └─────────┬────────┘          │
+│           │                             │                   │
+│           ↓                             ↓                   │
+│  ┌────────────────────────────┐  ┌─────────────────────┐   │
+│  │ NodePool (16KB)            │  │ User Pages          │   │
+│  │ - 1024 nodes × 16 bytes    │  │ - 100% payload      │   │
+│  │ - Cached in R1 register    │  │ - No sentinels      │   │
+│  │ - Index-based (uint16_t)   │  │ - No headers        │   │
+│  │ - Remappable for growth    │  │ - Pure data only    │   │
+│  └────────────────────────────┘  └─────────────────────┘   │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+
+         SYS0 (8KB) + NodeTable[15] in Reserved Region
 ```
 
-### 2.2 Scope Hierarchy
+### 2.2 Memory Regions
 
-**Scope** = General allocator interface (polymorphic)
-- Abstract type; parameter for generic operations
-- Operations: `Allocator.Scope.current()`, `.set()`, `.config()`, `.alloc()`, `.dispose()`
-- Concrete implementations: SYS0, Arena, Frame
+**SYS0 (8KB, separate mmap):**
+- Registers R0-R7 (64 bytes)
+  - R0 = SYS0 base address
+  - R1 = NodePool base address (key for index→pointer translation)
+  - R7 = Current scope pointer
+- ScopeTable[16] (896 bytes) - scope metadata
+- SlabTable[15] (360 bytes) - slab page tracking
+- NodeTable[15] (30 bytes) - BST root indices (uint16_t per slab)
+- DAT region (~6.6KB) - SYS0 allocations using block headers
 
-**Arena** = Concrete scope type with explicit lifecycle
-- Created via `Arena.create(policy, flags)` — policy immutable, flags mutable
-- Manages page chains and bump allocation
-- Supports nested frames via `Arena.begin_frame()` / `Arena.end_frame()`
-- Example: SLB0 is an Arena instance with POLICY_DYNAMIC
+**NodePool (16KB initial, separate mmap):**
+- 1024 nodes × 16 bytes = 16,384 bytes
+- Fixed array of `sc_node` structures
+- Node index 0xFFFF = null sentinel
+- Growable via remap (transparent to all code)
 
-**Frame** = Temporary scope nested within an Arena
-- Created via `Arena.begin_frame()` — returns frame handle
-- Checkpoint for allocation state (bump pointer saved)
-- On `Arena.end_frame(frame)`, bump restored → all frame-scoped allocations freed
-- Frames do NOT exist independently; always owned by an arena
+**User Pages (4KB each, per-slab):**
+- SLB0-SLB14: mmap'd on demand
+- 100% payload - no metadata whatsoever
+- RECLAIMING slabs: tracked by B-Tree nodes
+- BUMP slabs: tracked by SlabTable bump pointer only
 
-### 2.3 Allocation Strategies
+### 2.3 Scope Policies
 
-**SYS0 Strategy (Reclaiming):**
-- Metadata: block header + footer with next pointer and size
-- Suitable for: System objects with known lifetimes (arenas, frames, page chains)
-- Fragmentation: Possible; not suitable for app data
+| Policy | Description | Metadata | Use Case |
+|--------|-------------|----------|----------|
+| **RECLAIMING** | B-Tree tracked, coalescing | External (NodePool) | General-purpose, free/reuse |
+| **BUMP** | Simple bump allocator | None | Deterministic, frame-based |
+| **FIXED** | Pre-allocated, bounded | Minimal | Real-time, no growth |
 
-**Arena Strategy (Bump per page, chained):**
-- Single bump pointer per page; page chains for overflow
-- Reset via frames (checkpoint → alloc → restore) or arena reset
-- Suitable for: Bulk data with clear lifecycle
-- Fragmentation: Zero (except at arena boundary)
+**SYS0** = RECLAIMING (block header strategy for bootstrapping)  
+**SLB0** = RECLAIMING (default, general-purpose)  
+**SLB1-14** = User choice
 
-**SLB0** = Default arena allocator
-- Arena instance with POLICY_DYNAMIC (auto-grows by chaining pages)
-- SCOPE_FLAG_SECURE by default (can be modified)
-- Provides both `Arena.*` and `Allocator.*` APIs
+### 2.4 B-Tree Node Structure (16 bytes)
+
+```c
+struct sc_node {
+    addr start;         // 8: allocation start address
+    uint32_t length;    // 4: allocation size (up to 4GB)
+    uint16_t left_idx;  // 2: left child index (NODE_NULL = 0xFFFF)
+    uint16_t right_idx; // 2: right child index (NODE_NULL = 0xFFFF)
+};
+```
+
+**Key Properties:**
+- Stored in external NodePool (not in user pages)
+- Index-based children (not pointers) for fixed-size nodes
+- Keyed on `start` address for range queries
+- Length explicitly stored (solves disposal size detection)
+
+### 2.5 Allocation Flow (RECLAIMING Policy)
+
+```
+1. Get root index: root_idx = NodeTable[slab_id]
+2. Search B-Tree for first-fit free node (or best-fit)
+3. If found:
+   - Split if oversized (create new node for remainder)
+   - Mark as allocated
+   - Return node->start
+4. If not found:
+   - mmap new 4KB page
+   - Allocate new node from NodePool
+   - Insert into B-Tree
+   - Return address
+```
+
+### 2.6 Disposal Flow (RECLAIMING Policy)
+
+```
+1. Get root index: root_idx = NodeTable[slab_id]
+2. Search B-Tree for node where node->start == ptr
+3. If not found → panic (invalid free)
+4. Mark node as free
+5. Check adjacent nodes:
+   - Left neighbor: if (left->start + left->length == ptr) → coalesce
+   - Right neighbor: if (ptr + length == right->start) → coalesce
+6. If node spans entire page(s) and slab page_count > MIN:
+   - munmap page
+   - Remove node from tree
+```
 
 ---
 
-## 3. SYS0 Bootstrap Allocator (4K)
+## 3. SYS0 Bootstrap Allocator (8KB)
 
 ### 3.1 Page Layout
 
 ```
 Offset      Size    Content                    Purpose
 ──────────────────────────────────────────────────────────
-0           8       R0 Register (addr)         SYS0 base address (offset resolution)
-8           48      R1-R6 Registers (addr)     Reserved for future system use
-56          8       R7 Register (addr)         Cache for current_scope pointer
-64          128     Stack Space (16 slots)     Reserved for future system stack
-192         64      [Reserved for future SYS0 control data]
-256         16      First Block Header         Payload begins
-...         ...     [Free space for SYS0 alloc]
-4088        8       Footer Marker              Bookend
+RESERVED REGION (0-1535)
 ──────────────────────────────────────────────────────────
-Total:      4096 bytes
+0           64      Registers R0-R7            Virtual registers
+                    - R0: SYS0 base address
+                    - R1: NodePool base address ← KEY
+                    - R6: Parent scope (frame ops)
+                    - R7: Current scope pointer
+64          896     ScopeTable[16]             Scope metadata (16 × 56 bytes)
+960         360     SlabTable[15]              Slab tracking (15 × 24 bytes)
+1320        30      NodeTable[15]              BST roots (15 × uint16_t)
+1350        186     [Padding/Reserved]         Future expansion
+──────────────────────────────────────────────────────────
+DATA REGION (1536-8191)
+──────────────────────────────────────────────────────────
+1536        16      First Block Header         SYS0 allocations begin
+...         ...     [Free space]               ~6.5KB available
+8184        8       Footer Marker              Bookend (0xDEADC0DE)
+──────────────────────────────────────────────────────────
+Total:      8192 bytes (6656 bytes DAT available)
 ```
 
-### 3.2 Block Header Structure
+**Key Changes from v1.0:**
+- SYS0 size: 4KB → **8KB** (more DAT space for system metadata)
+- Added NodeTable[15] at offset 1320 (30 bytes)
+- R1 register caches NodePool base address
+- DAT region: 2752 bytes → **6656 bytes** (2.4× increase)
+
+### 3.2 Block Header Structure (SYS0 Only)
 
 **Field Layout (16 bytes, kAlign-aligned):**
 
 ```c
 struct sc_blk_header {
-    addr next_off;      // Offset to next block header (0 = this is last)
-    usize size;         // Total block size including header + footer
-    sbyte flags;        // BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT
+    addr next_off;      // Offset to next block header (0 = last)
+    usize size;         // Total block size including header
+    sbyte flags;        // BLK_FLAG_FREE | LAST | FOOT
     sbyte _pad[7];      // Alignment to 16 bytes
 }
 ```
 
+**Note:** This structure is **SYS0 only**. User slab pages have NO headers or metadata.
+
 **Flags:**
-- `BLK_FLAG_FREE (0x01)`: Block is unallocated (available for reuse)
-- `BLK_FLAG_LAST (0x02)`: This block is the last in the chain
-- `BLK_FLAG_FOOT (0x04)`: Header marks the page footer (special marker)
+- `BLK_FLAG_FREE (0x01)`: Block is unallocated
+- `BLK_FLAG_LAST (0x02)`: This block is last in chain
+- `BLK_FLAG_FOOT (0x04)`: Header marks the page footer
 
-**Invariants:**
-- All headers are kAlign (16-byte) aligned
-- Size always includes header (16) + payload + footer (8)
-- next_off = 0 means this is the last block or chain end
-
-### 3.3 Block Footer Structure
-
-**Field Layout (8 bytes):**
-
+**Block Footer (8 bytes):**
 ```c
 struct sc_blk_footer {
-    addr magic;         // 0xDEADC0DE (validity marker)
-    addr size_dup;      // Duplicate of header.size for validation
+    uint32_t magic;     // 0xDEADC0DE (validity marker)
+    uint32_t size_dup;  // Duplicate of header.size
 }
 ```
 
-**Purpose:**
-- Validates block integrity (no overflow/corruption)
-- Allows reverse traversal: given footer, compute header offset as `(current - size_dup)`
-
 ---
 
-## 4. Scopes & Arenas
+## 4. NodePool & B-Tree Management
 
-### 4.1 Scope Concept (General)
+### 4.1 NodePool Architecture
 
-A **scope** is a polymorphic allocator context accessed through the `Allocator` interface. All scopes implement:
-- `alloc(size)` — Polymorphic allocation
-- `dispose(ptr)` — Polymorphic deallocation
-- `config(mask_type)` — Query policy/flags
+**NodePool** is a separate memory region holding all B-Tree nodes:
 
-Scopes are used via:
-- **Implicit**: `Allocator.alloc(size)` — operates on current scope cached in R7
-- **Explicit**: `Allocator.Scope.alloc(scope, size)` — operates on given scope
+```
+R1 → ┌─────────────────────────────────────────┐
+     │ Node[0]   (16 bytes)                    │
+     │ Node[1]   (16 bytes)                    │
+     │ Node[2]   (16 bytes)                    │
+     │ ...                                      │
+     │ Node[1023] (16 bytes)                   │
+     └─────────────────────────────────────────┘
+     Total: 16,384 bytes (16KB initial)
+```
 
-### 4.2 Arena Concept (Concrete Scope Type)
+**Properties:**
+- **Separate mmap** from SYS0 (not inside SYS0)
+- **Base address cached in R1** register
+- **Index-based access**: `node_ptr = R1 + (index * 16)`
+- **Fixed-size nodes**: 16 bytes each
+- **Capacity**: 1024 nodes initially (16KB / 16)
+- **Growable**: Can remap to 32KB, 64KB... without code changes
 
-An **arena** is a concrete scope implementation with explicit lifecycle management and frame nesting support.
+### 4.2 Node Structure (16 bytes)
 
-**Arena Characteristics:**
-- Created with `Arena.create(policy, flags)` — immutable policy, mutable flags
-- Owns one or more pages chained via sentinels
-- Supports frame checkpoints for nested allocation scopes
-- Can be destroyed or reset (subject to flag constraints)
-
-**Arena Policy** (immutable at creation):
-- `SCOPE_POLICY_DYNAMIC`: Auto-grows by chaining pages on overflow
-- `SCOPE_POLICY_FIXED`: Pre-allocates all pages; returns NULL when exhausted
-
-**Arena Flags** (mutable post-creation, unless FIXED policy):
-- `SCOPE_FLAG_PROTECTED`: Blocks destroy/reset
-- `SCOPE_FLAG_PINNED`: Blocks set_current and frame ops
-- `SCOPE_FLAG_SECURE`: Blocks cross-arena move/copy
-
-**SLB0** = Default user-space arena
-- Instance of Arena with POLICY_DYNAMIC
-- Default SCOPE_FLAG_SECURE (modifiable)
-- Automatically initialized during bootstrap
-- Used by `Allocator.alloc()` when set as current scope
-
-### 4.3 Frame Concept (Temporary Scope)
-
-A **frame** is a temporary checkpoint scope created within an arena. Frames enable nested bulk deallocation.
-
-**Frame Characteristics:**
-- Created via `Arena.begin_frame()` (not standalone)
-- Saves allocation state: current page, bump pointer offset
-- On `Arena.end_frame(frame)`, state restored → all frame-scoped allocations freed
-- Frames are LIFO (last-created must be ended first)
-- Frames do NOT create new pages; reuse arena's pages
-
-**Frame Semantics:**
-- No explicit policy needed (inherits from owning arena)
-- Cannot be set as current scope (implicit when within frame)
-- Can be nested: frame within frame within arena (for deep scopes)
-
-**Example (pseudocode, Phase 3+):**
 ```c
-arena work = Arena.create(SCOPE_POLICY_DYNAMIC, SCOPE_FLAG_SECURE);
-Allocator.Scope.set(work);  // Set as current
+typedef uint16_t node_idx;  // 0-1023 valid, 0xFFFF = null
 
-frame outer = Arena.begin_frame();
-  object buf1 = Allocator.alloc(256);  // Allocates from work arena
-  frame inner = Arena.begin_frame();
-    object buf2 = Allocator.alloc(128);  // Same arena, same page(s)
-  Arena.end_frame(inner);  // buf2 freed; buf1 still valid
-  object buf3 = Allocator.alloc(64);
-Arena.end_frame(outer);  // buf1, buf3 freed
+#define NODE_NULL 0xFFFF    // Null sentinel value
+#define NODE_SIZE 16        // sizeof(sc_node)
+
+typedef struct sc_node {
+    addr start;             // 8: allocation start address in user page
+    uint32_t length;        // 4: allocation size (supports up to 4GB)
+    node_idx left_idx;      // 2: left child index (NODE_NULL if none)
+    node_idx right_idx;     // 2: right child index (NODE_NULL if none)
+} sc_node;                  // 16 bytes total
+```
+
+**Key Design Decisions:**
+- **Index-based pointers**: Use uint16_t indices instead of 8-byte pointers (saves 12 bytes per node)
+- **4GB allocation support**: uint32_t length allows single allocations up to 4GB
+- **Null sentinel**: 0xFFFF distinguishes null from valid index 0
+- **Fixed size**: Enables array-based storage, fast index→pointer translation
+
+### 4.3 NodeTable (30 bytes in SYS0-RES)
+
+**Location**: SYS0 offset 1320  
+**Size**: 15 × sizeof(node_idx) = 30 bytes
+
+```c
+// At SYS0 offset 1320
+node_idx NodeTable[15];  // One root per slab (SLB0-SLB14)
+```
+
+**Mapping:**
+- `NodeTable[0]` → SLB0 BST root index
+- `NodeTable[1]` → SLB1 BST root index
+- ...
+- `NodeTable[14]` → SLB14 BST root index
+
+**Values:**
+- `NODE_NULL (0xFFFF)` = no tree (BUMP policy, or no allocations yet)
+- `0-1023` = valid node index
+
+### 4.4 Node Access Functions (ptr_math.c)
+
+```c
+// Get node pointer from index (no macro - function in ptr_math.c)
+sc_node *get_node(node_idx idx);
+// Implementation: return (sc_node *)(R1_value + (idx * NODE_SIZE));
+
+// Get root index for slab
+node_idx get_root_index(sbyte slab_id);
+// Implementation: return NodeTable[slab_id];
+
+// Set root index for slab
+void set_root_index(sbyte slab_id, node_idx idx);
+// Implementation: NodeTable[slab_id] = idx;
+```
+
+### 4.5 Node Freelist Management
+
+**Bootstrap:**
+```
+1. mmap 16KB for NodePool
+2. Set R1 = NodePool base address
+3. Initialize all nodes as free (linked list via left_idx)
+4. freelist_head = 0 (first free node)
+```
+
+**Allocation:**
+```c
+node_idx node_alloc(void) {
+    if (freelist_head == NODE_NULL) {
+        // Pool exhausted - grow by remapping
+        grow_node_pool();
+    }
+    node_idx idx = freelist_head;
+    sc_node *node = get_node(idx);
+    freelist_head = node->left_idx;  // Advance freelist
+    node->left_idx = NODE_NULL;
+    node->right_idx = NODE_NULL;
+    return idx;
+}
+```
+
+**Disposal:**
+```c
+void node_free(node_idx idx) {
+    sc_node *node = get_node(idx);
+    node->left_idx = freelist_head;  // Link to current head
+    freelist_head = idx;             // This node is new head
+}
+```
+
+### 4.6 Node Pool Growth Strategy
+
+**When to grow:** When `freelist_head == NODE_NULL` (all nodes allocated)
+
+**Growth steps:**
+```
+1. Calculate new_size = current_size * 2  (16KB → 32KB → 64KB...)
+2. mmap new_size bytes
+3. memcpy old nodes to new region (preserve all data)
+4. Initialize upper half as free nodes
+5. munmap old region
+6. Update R1 = new_base (atomic update)
+7. Update freelist with new nodes
+```
+
+**Transparency:** All code uses `get_node(idx)` function, so remap is transparent.
+
+**Capacity tracking:**
+```c
+// Global state (in SYS0-DAT)
+usize node_pool_capacity = 1024;  // Current max nodes
+usize node_pool_allocated = 0;    // Nodes in use
+```
+
+### 4.7 B-Tree Operations (btree.c)
+
+**Search (find allocation by address):**
+```c
+node_idx btree_search(node_idx root, addr target) {
+    if (root == NODE_NULL) return NODE_NULL;
+    sc_node *node = get_node(root);
+    if (target == node->start) return root;  // Found
+    if (target < node->start) return btree_search(node->left_idx, target);
+    else return btree_search(node->right_idx, target);
+}
+```
+
+**Insert (add new allocation):**
+```c
+node_idx btree_insert(node_idx root, addr start, uint32_t length) {
+    if (root == NODE_NULL) {
+        // Create new node
+        node_idx idx = node_alloc();
+        sc_node *node = get_node(idx);
+        node->start = start;
+        node->length = length;
+        return idx;
+    }
+    sc_node *node = get_node(root);
+    if (start < node->start) {
+        node->left_idx = btree_insert(node->left_idx, start, length);
+    } else {
+        node->right_idx = btree_insert(node->right_idx, start, length);
+    }
+    return root;
+}
+```
+
+**Delete (remove allocation):**
+```c
+node_idx btree_delete(node_idx root, addr target) {
+    if (root == NODE_NULL) return NODE_NULL;
+    sc_node *node = get_node(root);
+    
+    if (target < node->start) {
+        node->left_idx = btree_delete(node->left_idx, target);
+    } else if (target > node->start) {
+        node->right_idx = btree_delete(node->right_idx, target);
+    } else {
+        // Found node to delete
+        if (node->left_idx == NODE_NULL) {
+            node_idx right = node->right_idx;
+            node_free(root);
+            return right;
+        } else if (node->right_idx == NODE_NULL) {
+            node_idx left = node->left_idx;
+            node_free(root);
+            return left;
+        }
+        // Two children - find successor
+        node_idx successor = find_min(node->right_idx);
+        sc_node *succ_node = get_node(successor);
+        node->start = succ_node->start;
+        node->length = succ_node->length;
+        node->right_idx = btree_delete(node->right_idx, succ_node->start);
+    }
+    return root;
+}
+```
+
+**Coalesce (merge adjacent free allocations):**
+```c
+void btree_coalesce(node_idx root, node_idx target_idx) {
+    sc_node *target = get_node(target_idx);
+    addr target_end = target->start + target->length;
+    
+    // Find left neighbor (largest node with start < target->start)
+    node_idx left_idx = find_predecessor(root, target->start);
+    if (left_idx != NODE_NULL) {
+        sc_node *left = get_node(left_idx);
+        addr left_end = left->start + left->length;
+        if (left_end == target->start) {
+            // Merge left into target
+            target->start = left->start;
+            target->length += left->length;
+            btree_delete(root, left->start);
+        }
+    }
+    
+    // Find right neighbor (smallest node with start > target->start)
+    node_idx right_idx = find_successor(root, target->start);
+    if (right_idx != NODE_NULL) {
+        sc_node *right = get_node(right_idx);
+        if (target_end == right->start) {
+            // Merge right into target
+            target->length += right->length;
+            btree_delete(root, right->start);
+        }
+    }
+}
 ```
 
 ---
 
-## 5. Data Structures
+## 5. Core Data Structures
 
 ### 5.1 Register Structure (Virtual Registers in SYS0)
 
@@ -233,13 +486,120 @@ Arena.end_frame(outer);  // buf1, buf3 freed
 **Field Layout (64 bytes, 8 addr fields):**
 
 ```c
-struct sc_registers_s {
-  addr R0;        // SYS0 base address (offset resolution)
-  addr R1;        // Reserved for future system use
-  addr R2;        // Reserved for future system use
-  addr R3;        // Reserved for future system use
-  addr R4;        // Reserved for future system use
-  addr R5;        // Reserved for future system use
+typedef struct sc_registers {
+    addr R0;        // SYS0 base address (offset resolution)
+    addr R1;        // NodePool base address ← KEY for node access
+    addr R2;        // Reserved
+    addr R3;        // Reserved
+    addr R4;        // Reserved
+    addr R5;        // Reserved
+    addr R6;        // Parent scope pointer (for frame operations)
+    addr R7;        // Current scope pointer (cache)
+} sc_registers;     // 64 bytes total
+```
+
+**Purpose:**
+- **R0**: SYS0 base address for relative offset calculations
+- **R1**: NodePool base address - enables `get_node(idx)` to translate index→pointer
+- **R6**: Saved parent scope pointer (used during frame enter/exit)
+- **R7**: Current scope pointer for O(1) lookup
+
+**Invariants:**
+- All registers store `addr` (uintptr_t) values, not C pointers
+- R7 = 0 means no active scope
+- Register access is O(1)
+
+### 5.2 Scope Entry (56 bytes)
+
+```c
+typedef struct sc_scope {
+    usize scope_id;         //  8: Index in scope_table
+    sbyte slab_id;          //  1: Slab index (-1 for SYS0, 0-14 for SLB0-SLB14)
+    sbyte policy;           //  1: SCOPE_POLICY_*
+    sbyte flags;            //  1: SCOPE_FLAG_* bitmask
+    sbyte _pad[5];          //  5: Alignment
+    addr frame_bump;        //  8: Saved bump pointer for frame rollback
+    char name[16];          // 16: Inline name
+    object (*alloc_fn)(usize size);   //  8: Allocation strategy
+    void (*dispose_fn)(object ptr);   //  8: Disposal strategy
+} sc_scope;                 // Total: 56 bytes
+```
+
+**Scope Table Layout:**
+| Index | Scope | slab_id | Policy | Flags |
+|-------|-------|---------|--------|-------|
+| 0 | SYS0 | -1 | RECLAIMING | PROTECTED \| PINNED |
+| 1 | SLB0 | 0 | RECLAIMING | SECURE |
+| 2-15 | User slabs | 1-14 | User-defined | User-defined |
+
+**Note:** `slab_id` maps scope to slab. SYS0 has no slab (-1), SLB0-SLB14 map to slabs 0-14.
+
+### 5.3 Slab Descriptor (24 bytes)
+
+```c
+typedef struct sc_slab {
+    mem_page head;          // 8: First page address
+    usize page_count;       // 8: Number of pages in chain
+    usize total_allocated;  // 8: Bytes allocated across all pages
+} sc_slab;                  // 24 bytes total
+
+typedef byte *mem_page;     // Pointer to mmap'd 4KB page
+```
+
+**Purpose:**
+- Tracks page chain for each slab
+- `head` points to first 4KB page
+- For RECLAIMING slabs: pages tracked by B-Tree nodes
+- For BUMP slabs: pages managed by simple bump pointer
+
+**Slab Table Layout (offset 960):**
+| Index | Slab | Scope | Page Chain |
+|-------|------|-------|------------|
+| 0 | SLB0 | scope_table[1] | head → page0 → page1 → ... |
+| 1 | SLB1 | scope_table[2] | head → ... |
+| ... | | | |
+| 14 | SLB14 | scope_table[15] | head → ... |
+
+### 5.4 NodeTable (30 bytes in SYS0-RES)
+
+```c
+// At SYS0 offset 1320
+typedef uint16_t node_idx;
+
+node_idx NodeTable[15];  // BST root index per slab
+```
+
+**Mapping:**
+- `NodeTable[slab_id]` → root node index for that slab's B-Tree
+- Value `NODE_NULL (0xFFFF)` = no tree (BUMP policy or empty slab)
+- Value `0-1023` = valid root node index
+
+### 5.5 B-Tree Node (16 bytes in NodePool)
+
+```c
+typedef struct sc_node {
+    addr start;             // 8: allocation start address
+    uint32_t length;        // 4: allocation size
+    node_idx left_idx;      // 2: left child index
+    node_idx right_idx;     // 2: right child index
+} sc_node;                  // 16 bytes total
+
+#define NODE_NULL 0xFFFF    // Null sentinel
+#define NODE_SIZE 16        // sizeof(sc_node)
+```
+
+**Properties:**
+- Lives in **NodePool** (separate from SYS0 and user pages)
+- Keyed on `start` address for BST ordering
+- Index-based children (not pointers)
+- Explicitly stores allocation `length`
+
+**Comparison with old designs:**
+| Design | Metadata Location | Size Overhead | Page Utilization |
+|--------|-------------------|---------------|------------------|
+| Bitmap (v0.2.0) | Page sentinel + bitmap | 112 bytes/page | ~97% |
+| Headers (inline) | Per-allocation headers | 8-16 bytes/alloc | Variable |
+| B-Tree (v2.0) | External NodePool | 0 bytes/page | **100%** |
   addr R6;        // Reserved for future system use
   addr R7;        // Current scope pointer (cache)
 }
