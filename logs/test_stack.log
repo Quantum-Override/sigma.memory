@@ -1,0 +1,19 @@
+[2] Memory: NodeStack Operations :   15 : 2026-02-07  05:40:42                  
+================================================================================
+Running: Stack: initialized empty                                3.424 ms [PASS]
+Running: Stack: push single value                                1.632 ms [PASS]
+Running: Stack: push and pop value                               1.561 ms [PASS]
+Running: Stack: peek preserves value                             1.543 ms [PASS]
+Running: Stack: pop empty returns error                          1.400 ms [PASS]
+Running: Stack: peek empty returns error                         1.403 ms [PASS]
+Running: Stack: pop with NULL returns error                      1.484 ms [PASS]
+Running: Stack: peek with NULL returns error                     1.398 ms [PASS]
+Running: Stack: LIFO order                                       1.738 ms [PASS]
+Running: Stack: multiple push/peek consistency                   1.641 ms [PASS]
+Running: Stack: fill to capacity                                 1.859 ms [PASS]
+Running: Stack: push when full returns error                     1.727 ms [PASS]
+Running: Stack: full/pop/push cycle                              1.822 ms [PASS]
+Running: Stack: clear empties stack                              1.503 ms [PASS]
+Running: Stack: reusable after clear                             1.469 ms [PASS]
+================================================================================
+[2]     TESTS= 15        PASS= 15        FAIL=  0        SKIP=  0

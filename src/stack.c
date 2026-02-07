@@ -48,7 +48,7 @@ static usize get_stack_pointer(void);
 #define STACK_DEPTH_OFFSET SYS0_NODE_STACK_OFFSET
 #define STACK_DATA_OFFSET (SYS0_NODE_STACK_OFFSET + sizeof(addr))
 #define STACK_DATA_SIZE (SYS0_NODE_STACK_SIZE - sizeof(addr))  // 120 bytes
-#define STACK_SLOT_COUNT 15  // 120 bytes / 8 bytes per slot
+#define STACK_SLOT_COUNT 15                                    // 120 bytes / 8 bytes per slot
 
 // API function definitions
 
