@@ -122,14 +122,16 @@ void test_sys0_alloc_leaves_free_block(void) {
 }
 void test_slab_slot_allocation(void) {
     /*
-     * SYS0 Page Layout (4096 bytes):
+     * SYS0 Page Layout (8192 bytes - v0.2.0):
      *
-     * |-------- RESERVED (256) --------|---- DATA AREA ----|
-     * | Regs | SlabArray  | unused     | slotarray | free  |
-     * | (64) | bucket(128)| (64)       | (alloc'd) |       |
-     * 0      64          192          256
-     *        ^            ^            ^
-     *        SLOTS_OFFSET SLOTS_END    FIRST_BLOCK_OFFSET
+     * |---------- RESERVED (1536) ----------|----- DATA AREA (6656) -----|
+     * | Regs | SlabArray | ... | NodeTable | NodeStack | ... | slotarray | free |
+     * | (64) | (128)     |     | (30)      | (128)     |     | (alloc'd) |      |
+     * 0      64          192   1320        1350        1478  1536        8192
+     *        ^           ^     ^           ^           ^     ^           ^
+     *        SLOTS_OFFSET|     NODE_TABLE  NODE_STACK  |     FIRST_BLOCK LAST_FOOTER
+     *                    SLOTS_END                     |     (data start)
+     *                                                  (reserved end)
      */
 
     addr sys0_base = Memory.get_sys0_base();

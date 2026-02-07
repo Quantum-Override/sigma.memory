@@ -33,16 +33,20 @@
 
 // layout constants
 #define kAlign 16                                // 16-byte alignment
-#define SYS0_PAGE_SIZE 4096                      // 4 KB system page size
+#define SYS0_PAGE_SIZE 8192                      // 8 KB system page size (v0.2.0)
 #define BLK_END 0xDEADC0DE                       // end of block marker
 #define SYS0_REGISTERS_OFFSET 0                  // offset of registers region
 #define SYS0_REGISTERS_SIZE (8 * sizeof(addr))   // 64 bytes
 #define SYS0_SLOTS_OFFSET (SYS0_REGISTERS_SIZE)  // 64 bytes
 #define SYS0_SLOTS_SIZE 128                      // 128 bytes (16 slots of 8 bytes each)
 #define SYS0_SLOTS_END (SYS0_SLOTS_OFFSET + SYS0_SLOTS_SIZE)         // 192
-#define SYS0_RESERVED_SIZE 256                                       // Power-of-2 reserved region
-#define FIRST_BLOCK_OFFSET (SYS0_RESERVED_SIZE)                      // 256
-#define LAST_FOOTER_OFFSET (SYS0_PAGE_SIZE - sizeof(sc_blk_footer))  // 4088
+#define SYS0_RESERVED_SIZE 1536                                      // Extended reserved region
+#define SYS0_NODE_TABLE_OFFSET 1320              // NodeTable[15] @ offset 1320 (30 bytes)
+#define SYS0_NODE_TABLE_SIZE 30                  // 15 root indices × 2 bytes
+#define SYS0_NODE_STACK_OFFSET 1350              // NodeStack @ offset 1350 (128 bytes)
+#define SYS0_NODE_STACK_SIZE 128                 // 16 slots × 8 bytes
+#define FIRST_BLOCK_OFFSET (SYS0_RESERVED_SIZE)                      // 1536
+#define LAST_FOOTER_OFFSET (SYS0_PAGE_SIZE - sizeof(sc_blk_footer))  // 8184
 // Scope table layout (in SYS0 data area, not reserved)
 #define SCOPE_TABLE_COUNT 16  // 16 scope entries
 #define SCOPE_ENTRY_SIZE 64   // Each scope entry is 64 bytes
@@ -69,6 +73,33 @@ typedef struct sc_registers {
     addr R7;     // Current scope pointer (R7: enables O(1) scope lookup)
 } sc_registers;  // size 64 bytes
 typedef struct sc_registers *registers;
+
+#endif
+
+#if 1  // Region: B-Tree Node Definitions (v0.2.0)
+// Node index type (16-bit index into NodePool)
+typedef uint16_t node_idx;
+#define NODE_NULL ((node_idx)0)  // Null node index
+
+// B-Tree node structure (18 bytes - external metadata)
+typedef struct sc_node {
+    addr start;              // 8: allocation start address
+    uint32_t length;         // 4: actual size in bytes (up to 4GB)
+    uint16_t left_idx;       // 2: left child index (NODE_NULL if none)
+    uint16_t right_idx;      // 2: right child index (NODE_NULL if none)
+    uint16_t max_free_log2;  // 2: packed optimization hint
+    // Bits 0-7:   log2(max_free_size) - represents 2^0 to 2^255 bytes
+    // Bit 8:      direction (0=left, 1=right subtree has max)
+    // Bit 9:      THIS node is free (FREE_FLAG)
+    // Bits 10-15: reserved
+} sc_node;  // Total: 18 bytes - lean and efficient
+typedef struct sc_node *btree_node;
+
+// Bit masks for max_free_log2 field
+#define NODE_SIZE_MASK 0x00FF      // Bits 0-7: log2 size
+#define NODE_DIRECTION_BIT 0x0100  // Bit 8: direction
+#define NODE_FREE_FLAG 0x0200      // Bit 9: free flag
+#define NODE_RESERVED_MASK 0xFC00  // Bits 10-15: reserved
 
 #endif
 
