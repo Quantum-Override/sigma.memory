@@ -39,13 +39,13 @@
 #define SYS0_REGISTERS_SIZE (8 * sizeof(addr))   // 64 bytes
 #define SYS0_SLOTS_OFFSET (SYS0_REGISTERS_SIZE)  // 64 bytes
 #define SYS0_SLOTS_SIZE 128                      // 128 bytes (16 slots of 8 bytes each)
-#define SYS0_SLOTS_END (SYS0_SLOTS_OFFSET + SYS0_SLOTS_SIZE)         // 192
-#define SYS0_RESERVED_SIZE 1536                                      // Extended reserved region
+#define SYS0_SLOTS_END (SYS0_SLOTS_OFFSET + SYS0_SLOTS_SIZE)  // 192
+#define SYS0_RESERVED_SIZE 1536                               // Extended reserved region
 #define SYS0_NODE_TABLE_OFFSET 1320              // NodeTable[15] @ offset 1320 (30 bytes)
 #define SYS0_NODE_TABLE_SIZE 30                  // 15 root indices × 2 bytes
 #define SYS0_NODE_STACK_OFFSET 1350              // NodeStack @ offset 1350 (128 bytes)
 #define SYS0_NODE_STACK_SIZE 128                 // 16 slots × 8 bytes
-#define FIRST_BLOCK_OFFSET (SYS0_RESERVED_SIZE)                      // 1536
+#define FIRST_BLOCK_OFFSET (SYS0_RESERVED_SIZE)  // 1536
 #define LAST_FOOTER_OFFSET (SYS0_PAGE_SIZE - sizeof(sc_blk_footer))  // 8184
 // Scope table layout (in SYS0 data area, not reserved)
 #define SCOPE_TABLE_COUNT 16  // 16 scope entries
@@ -64,12 +64,12 @@ enum {
 // Virtual registers (R0-R7) cached in SYS0
 typedef struct sc_registers {
     addr R0;     // SYS0 base address (R0: enables relative offset resolution)
-    addr R1;     // Reserved
-    addr R2;     // Reserved
+    addr R1;     // Reserved (will cache NodePool base in v0.2.0)
+    addr R2;     // Operation result register (convention: B-Tree ops return via R2)
     addr R3;     // Reserved
     addr R4;     // Reserved
     addr R5;     // Reserved
-    addr R6;     // Reserved
+    addr R6;     // Reserved (will cache parent scope in v0.2.0)
     addr R7;     // Current scope pointer (R7: enables O(1) scope lookup)
 } sc_registers;  // size 64 bytes
 typedef struct sc_registers *registers;
