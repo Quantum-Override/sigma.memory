@@ -233,6 +233,102 @@ This builds the necessary library objects, compiles the test source (`$TEST_DIR/
 ./ctest --help
 ```
 
+## Test Organization
+
+Tests are organized into subdirectories by purpose:
+
+```
+test/
+├── unit/              # Core functionality (run in CI)
+│   ├── test_bootstrap.c      # SYS0 initialization
+│   ├── test_pagelist.c       # Skip list (Tier 1)
+│   └── test_btree_page.c     # B-trees (Tier 2)
+├── integration/       # End-to-end system tests
+│   └── test_integration.c    # Full allocator workflows
+├── validation/        # Correctness proofs
+│   └── test_invariants.c     # B-tree invariants
+├── performance/       # Benchmarks (manual runs)
+│   ├── test_allocation_throughput.c
+│   ├── test_search_scaling.c
+│   └── benchmark_journal.md  # Running log of results
+└── stress/            # Long-running hardening
+    ├── test_sustained_load.c       # 1M+ operations
+    ├── test_memory_exhaustion.c    # NodePool limits
+    └── test_edge_cases.c           # Boundary conditions
+```
+
+### Running Tests by Category
+
+Tests are run from the **project root** using `ctest <name>`:
+
+**Unit Tests** (always run in CI):
+```bash
+ctest bootstrap      # test/unit/test_bootstrap.c
+ctest pagelist       # test/unit/test_pagelist.c
+ctest btree_page     # test/unit/test_btree_page.c
+```
+
+**Integration Tests**:
+```bash
+ctest integration    # test/integration/test_integration.c
+```
+
+**Validation Tests**:
+```bash
+ctest invariants     # test/validation/test_invariants.c
+```
+
+**Performance Benchmarks** (not run by default - TODO stubs in v0.2.0):
+```bash
+# These are placeholder tests for v0.2.1+
+ctest allocation_throughput   # test/performance/test_allocation_throughput.c
+ctest search_scaling          # test/performance/test_search_scaling.c
+# Results will be recorded in test/performance/benchmark_journal.md
+```
+
+**Stress Tests** (long-running, manual - TODO stubs in v0.2.0):
+```bash
+# These are placeholder tests for v0.2.1+
+ctest sustained_load --valgrind    # test/stress/test_sustained_load.c
+ctest memory_exhaustion            # test/stress/test_memory_exhaustion.c
+ctest edge_cases                   # test/stress/test_edge_cases.c
+```
+
+### All Tests Quick Run
+
+Run all active tests (v0.2.0):
+```bash
+for test in bootstrap pagelist btree_page integration invariants; do
+  ctest $test || exit 1
+done
+```
+
+### Test Categories Explained
+
+- **unit/**: Fast, focused tests of individual components. Run on every commit.
+- **integration/**: Test multiple components working together. Run before release.
+- **validation/**: Mathematical invariants and correctness proofs. Run before release.
+- **performance/**: Benchmarks for throughput, latency, scaling. Results tracked in `benchmark_journal.md` and included in release notes.
+- **stress/**: Long-running tests (hours), memory exhaustion, edge cases. Run weekly or before major releases.
+
+### Benchmark Journal
+
+Performance benchmarks are tracked in `test/performance/benchmark_journal.md`:
+- Records baseline metrics for each version
+- Tracks improvements/regressions over time
+- Documents test methodology and system specs
+- Key results copied to release notes
+
+### Notes
+
+- **Run ctest from project root** (uses symlinks in `test/` directory)
+- Test sources organized in subdirectories: `test/unit/`, `test/integration/`, `test/validation/`, `test/performance/`, `test/stress/`
+- Symlinks in `test/` root (e.g., `test/test_bootstrap.c` → `unit/test_bootstrap.c`) maintain compatibility with ctest
+- Test binaries built to `build/test/`
+- Logs written to `logs/`
+- All test categories use the sigmatest framework
+- Performance and stress tests have TODO stubs (implementation in v0.2.1+)
+
 ## Packaging (`cpack`)
 
 Make `cpack` executable: `chmod +x cpack`

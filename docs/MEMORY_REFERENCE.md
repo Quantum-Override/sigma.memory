@@ -1,8 +1,8 @@
 # SigmaCore Memory System - Architecture & Reference Guide
 
-**Version:** 0.2.0-btree  
-**Date:** February 7, 2026  
-**Status:** In Development (Phase 2 Complete: NodePool + Stack)
+**Version:** 0.2.0-alpha  
+**Date:** February 12, 2026  
+**Status:** Alpha Release (Critical bugfix + 2KB NodePool + Dynamic growth)
 
 ---
 
@@ -13,7 +13,7 @@ The SigmaCore memory management system implements a **B-Tree external metadata a
 | Component | Description | Strategy |
 |-----------|-------------|----------|
 | **SYS0** | Bootstrap allocator (8KB static page) | First-fit reclaiming |
-| **NodePool** | B-Tree metadata (24KB separate mmap) | External allocation tracking |
+| **NodePool** | B-Tree metadata (2KB initial, grows to 32KB+) | External allocation tracking |
 | **SLB0** | User-space allocator (16 pages) | 100% page utilization |
 | **SLBn** | User-defined arenas (scope_table[2-15]) | Per-slab B-Trees |
 
@@ -23,7 +23,7 @@ The SigmaCore memory management system implements a **B-Tree external metadata a
 - **Register Machine Model**: R1 (NodePool base), R2 (operation results), stack-based params
 - **Per-Slab B-Trees**: Each slab maintains its own allocation tree (selective complexity)
 - **Log2 Hints**: 8-bit log2 encoding represents 2^0 to 2^255 bytes for first-fit optimization
-- **18-byte Nodes** (24 with padding): Lean metadata for 4KB allocations
+- **24-byte Nodes**: Cache-friendly metadata (3 nodes per 64-byte cache line)
 
 ---
 
@@ -34,14 +34,13 @@ The SigmaCore memory management system implements a **B-Tree external metadata a
 ```
 Offset      Size    Content                    
 ────────────────────────────────────────────────────────
-RESERVED REGION (0-1535)
+RESERVED REGION (0-1535) [Phase 7: Reorganized]
 ────────────────────────────────────────────────────────
-0           64      Registers R0-R7            
-64          128     Slab Slots[16]             
-192         1128    [Unused reserved space]    
-1320        30      NodeTable[15] (B-Tree roots)
-1350        128     NodeStack (operation params)
-1478        58      [Unused reserved space]
+0           64      Registers R0-R7 (8 × 8 bytes)
+64          128     SlabTable[16] (16 × 8 bytes)
+192         128     Generic Stack[16] (16 × 8 bytes)
+320         30      NodeTable[15] (15 × 2 bytes)
+350         1186    [Unused reserved space]
 ────────────────────────────────────────────────────────
 DATA AREA (1536-8191)
 ────────────────────────────────────────────────────────
@@ -54,19 +53,20 @@ DATA AREA (1536-8191)
 Total:      8192 bytes (6656 bytes DAT available)
 ```
 
-### 2.2 NodePool (24KB Separate mmap)
+### 2.2 NodePool (2KB Initial, Grows Dynamically)
 
 ```
 Index       Size    Content                    
 ────────────────────────────────────────────────────────
 0           24      [Reserved - NODE_NULL sentinel]
-1-1023      24×1023 B-Tree nodes (free list)
+1-82        24×82   B-Tree nodes (initial capacity)
 ────────────────────────────────────────────────────────
-Total:      24KB (1,024 nodes × 24 bytes)
+Total:      2KB (83 nodes × 24 bytes) initial
+Growth:     2KB → 4KB → 8KB → 16KB → 32KB (doubles)
 ```
 
 **NodePool Characteristics:**
-- Separate mmap allocation (growable: 24KB → 48KB → 96KB)
+- Separate mmap allocation (starts small, grows on demand)
 - Base address cached in R1 register
 - LIFO free list (uses left_idx as next pointer)
 - O(1) indexed access: `base + (idx × 24)`
@@ -88,8 +88,8 @@ Total:      24KB (1,024 nodes × 24 bytes)
 // B-Tree Support Structures (v0.2.0)
 #define SYS0_NODE_TABLE_OFFSET 1320  // NodeTable[15] @ 1320 (30 bytes)
 #define SYS0_NODE_TABLE_SIZE 30      // 15 root indices × 2 bytes
-#define SYS0_NODE_STACK_OFFSET 1350  // NodeStack @ 1350 (128 bytes)
-#define SYS0_NODE_STACK_SIZE 128     // 16 slots × 8 bytes (15 usable + 1 depth)
+#define SYS0_NODE_STACK_OFFSET 1350  // NodeStack @ 1350 (256 bytes) [Phase 7: expanded]
+#define SYS0_NODE_STACK_SIZE 256     // 32 slots × 8 bytes (31 usable + 1 depth)
 
 #define SYS0_RESERVED_SIZE 1536      // Extended reserved region
 
@@ -101,10 +101,10 @@ Total:      24KB (1,024 nodes × 24 bytes)
 #define SCOPE_TABLE_COUNT 16
 #define SCOPE_ENTRY_SIZE 64          // 16 × 64 = 1024 bytes
 
-// NodePool (v0.2.0)
-#define NODE_POOL_INITIAL_SIZE (24 * 1024)   // 24KB
-#define NODE_POOL_INITIAL_COUNT 1024         // 1,024 nodes
-#define NODE_SIZE 24                         // sizeof(sc_node) with padding
+// NodePool (v0.2.0-alpha)
+#define NODE_POOL_INITIAL_SIZE (2 * 1024)    // 2KB (start small, grow dynamically)
+#define NODE_POOL_INITIAL_COUNT 83           // ~83 nodes initial
+#define NODE_SIZE 24                         // sizeof(sc_node)
 ```
 
 ---
@@ -153,26 +153,26 @@ Stack.clear();              // Clean up stack
 - R3-R5 registers (available)
 - Their own calling conventions
 
-### 3.2 B-Tree Node (24 bytes with padding)
+### 3.2 B-Tree Node (24 bytes - Cache Friendly)
 
 ```c
 typedef uint16_t node_idx;
 #define NODE_NULL ((node_idx)0)
 
 typedef struct sc_node {
-    addr start;              //  8: allocation start address
-    uint32_t length;         //  4: actual size in bytes (up to 4GB)
-    uint16_t left_idx;       //  2: left child index (NODE_NULL if none)
-    uint16_t right_idx;      //  2: right child index (NODE_NULL if none)
-    uint16_t max_free_log2;  //  2: packed optimization hint
+    addr start;          //  8: allocation start address
+    uint32_t length;     //  4: actual size in bytes (up to 4GB)
+    uint16_t left_idx;   //  2: left child index (NODE_NULL if none)
+    uint16_t right_idx;  //  2: right child index (NODE_NULL if none)
+    uint16_t info;       //  2: packed optimization hints and flags
     // Bits 0-7:   log2(max_free_size) - 2^0 to 2^255 bytes
     // Bit 8:      direction (0=left, 1=right subtree has max)
     // Bit 9:      FREE_FLAG (this node is free)
-    // Bits 10-15: reserved
-    // +6 bytes compiler padding → 24 bytes total
-} sc_node;
+    // Bits 10-15: reserved for future use
+    uint8_t _reserved[6]; //  6: reserved for future extensions
+} sc_node;               // 24: Total (3 nodes per 64B cache line)
 
-// Bit masks for max_free_log2 field
+// Bit masks for info field
 #define NODE_SIZE_MASK     0x00FF  // Bits 0-7: log2 size
 #define NODE_DIRECTION_BIT 0x0100  // Bit 8: direction  
 #define NODE_FREE_FLAG     0x0200  // Bit 9: free flag
@@ -180,7 +180,7 @@ typedef struct sc_node {
 ```
 
 **Node Design Rationale:**
-- **18 bytes declared, 24 actual**: Compiler adds 6-byte padding for 8-byte alignment
+- **24 bytes explicit**: Padded to fit 3 nodes in a 64-byte cache line
 - **No in-page metadata**: User pages are 100% payload
 - **Log2 hints**: 8 bits represent sizes from 1 byte (2^0) to huge (2^255)
 - **Bit-packed flags**: Saves separate flag field, keeps structure lean
@@ -188,7 +188,7 @@ typedef struct sc_node {
 ### 3.3 NodeStack (128 bytes in SYS0)
 
 ```c
-// Stack at SYS0 offset 1350
+// Stack at SYS0 offset 350
 // 8 bytes: depth tracking
 // 120 bytes: 15 slots × 8 bytes each
 
@@ -283,15 +283,15 @@ For all nodes N:
 
 **I2. Free Node Marking**
 ```
-Node is free ⟺ (max_free_log2 & NODE_FREE_FLAG) != 0
-Node is allocated ⟺ (max_free_log2 & NODE_FREE_FLAG) == 0
+Node is free ⟺ (info & NODE_FREE_FLAG) != 0
+Node is allocated ⟺ (info & NODE_FREE_FLAG) == 0
 ```
 
 **I3. Max-Free Hint Accuracy**
 ```
 For all non-leaf nodes N:
-  log2_value = (N.max_free_log2 & NODE_SIZE_MASK)
-  direction = (N.max_free_log2 & NODE_DIRECTION_BIT) ? right : left
+  log2_value = (N.info & NODE_SIZE_MASK)
+  direction = (N.info & NODE_DIRECTION_BIT) ? right : left
   
   ⟹ subtree[direction] contains free node with size ≥ 2^log2_value
 ```
@@ -334,18 +334,18 @@ Algorithm:
        node ← get_node(current)
        
        // Is this node free and large enough?
-       if (node.max_free_log2 & NODE_FREE_FLAG) and (node.length ≥ size):
+       if (node.info & NODE_FREE_FLAG) and (node.length ≥ size):
            best_fit ← current
            break  // First fit (could continue for best fit)
        
        // Use hint to prune search
-       hint_log2 ← node.max_free_log2 & NODE_SIZE_MASK
+       hint_log2 ← node.info & NODE_SIZE_MASK
        hint_size ← 2^hint_log2
        if hint_size < size:
            break  // Subtrees can't satisfy request
        
        // Follow hint direction
-       if (node.max_free_log2 & NODE_DIRECTION_BIT):
+       if (node.info & NODE_DIRECTION_BIT):
            current ← node.right_idx
        else:
            current ← node.left_idx
@@ -368,7 +368,7 @@ Algorithm:
   5. new_node.length ← length
   6. new_node.left_idx ← NODE_NULL
   7. new_node.right_idx ← NODE_NULL
-  8. new_node.max_free_log2 ← 0 (allocated node, no free flag)
+  8. new_node.info ← 0 (allocated node, no free flag)
   
   9. If root_idx == NODE_NULL:
        R2 ← new_idx  // New root
@@ -403,9 +403,9 @@ Time:    O(log n)
 
 Algorithm:
   1. node ← get_node(node_idx)
-  2. node.max_free_log2 |= NODE_FREE_FLAG  // Set free bit
+  2. node.info |= NODE_FREE_FLAG  // Set free bit
   3. log2_size ← compute_log2(node.length)
-  4. node.max_free_log2 |= (log2_size & NODE_SIZE_MASK)
+  4. node.info |= (log2_size & NODE_SIZE_MASK)
   
   5. // TODO: Walk up tree updating hints (requires parent pointers or stack)
   6. R2 ← OK
@@ -445,7 +445,193 @@ Algorithm:
   9. R2 ← node_idx  // No coalescing, return original
 ```
 
-### 4.3 Edge Cases & Test Strategy
+### 4.3 Red-Black Tree Balancing (Phase 7 / v0.1.0)
+
+**Why Balancing Matters:**
+- Unbalanced BST degenerates to O(n) with sequential insertions
+- Production allocators see sequential patterns frequently
+- Red-Black trees guarantee O(log n) worst-case performance
+
+**Red-Black Properties:**
+1. Every node is RED or BLACK
+2. Root is BLACK
+3. All leaves (NULL) are BLACK
+4. RED nodes have BLACK children (no consecutive reds)
+5. All paths from root to leaves have same number of BLACK nodes
+
+**Maximum Height:** h_max = 2 × log₂(n + 1)
+
+#### 4.3.1 Node Color Encoding
+
+**Steal 1 bit from info field:**
+```c
+// Bit layout of info field (16-bit):
+// [15:9] = unused (7 bits)
+// [8]    = NODE_COLOR_BIT (0=BLACK, 1=RED)
+// [7]    = NODE_FREE_FLAG  
+// [6]    = NODE_DIRECTION_BIT
+// [5:0]  = log2 size (0-63, represents 2^0 to 2^63)
+
+#define NODE_COLOR_BIT    0x0100  // Bit 8
+#define NODE_COLOR_RED    0x0100
+#define NODE_COLOR_BLACK  0x0000
+
+// Check color
+bool is_red(btree_node node) {
+    return (node->info & NODE_COLOR_BIT) != 0;
+}
+
+// Set color
+void set_red(btree_node node) {
+    node->info |= NODE_COLOR_BIT;
+}
+void set_black(btree_node node) {
+    node->info &= ~NODE_COLOR_BIT;
+}
+```
+
+**Node structure remains 24 bytes** - no growth!
+
+#### 4.3.2 Stack-Based Parent Tracking
+
+**Problem:** Rotations need parent/grandparent access  
+**Traditional Solution:** Add parent pointers (+2 bytes per node)  
+**Our Solution:** Use NodeStack to track descent path
+
+**NodeStack Requirements:**
+```
+Max height for Red-Black tree:
+  - 1024 nodes:  2×log₂(1024) = 20 levels
+  - 4096 nodes:  2×log₂(4096) = 24 levels
+  - 65536 nodes: 2×log₂(65536) = 32 levels
+
+Current: 16 slots (128 bytes) ⚠️ INSUFFICIENT
+Phase 7: 32 slots (256 bytes) ✓ SUFFICIENT (supports 4B nodes!)
+```
+
+**Insertion Pattern with Stack:**
+```c
+// Phase 1: Descend and push path
+node_idx rb_insert(root, start, length) {
+    Stack.clear();
+    
+    // Descend tree, pushing ancestors
+    current = root;
+    while (current != NODE_NULL) {
+        Stack.push(current);        // Push parent
+        
+        node = get_node(current);
+        if (start < node->start)
+            current = node->left_idx;
+        else
+            current = node->right_idx;
+    }
+    
+    // Insert new red node (default color)
+    new_idx = NodePool.alloc_node();
+    new_node = get_node(new_idx);
+    new_node->start = start;
+    new_node->length = length;
+    set_red(new_node);  // New nodes are RED
+    
+    // Link to parent (popped from stack)
+    parent_idx = Stack.pop();
+    link_child(parent_idx, new_idx, start);
+    
+    // Phase 2: Fix red-black violations
+    return rb_fixup_insert(new_idx);
+}
+
+// Phase 2: Fix violations using stack
+node_idx rb_fixup_insert(node_idx) {
+    while (Stack.depth() >= 2) {  // Need parent + grandparent
+        parent_idx = Stack.pop();
+        grandparent_idx = Stack.peek();  // Don't pop yet
+        
+        parent = get_node(parent_idx);
+        if (!is_red(parent)) break;  // No violation
+        
+        grandparent = get_node(grandparent_idx);
+        uncle_idx = get_uncle(grandparent, parent_idx);
+        
+        if (uncle_idx != NODE_NULL && is_red(get_node(uncle_idx))) {
+            // Case 1: Recolor
+            set_black(parent);
+            set_black(get_node(uncle_idx));
+            set_red(grandparent);
+            node_idx = grandparent_idx;  // Continue up tree
+            
+        } else {
+            // Case 2/3: Rotation needed
+            Stack.pop();  // Now pop grandparent
+            great_grandparent_idx = Stack.is_empty() ? NODE_NULL : Stack.peek();
+            
+            new_subtree_root = perform_rotation(
+                great_grandparent_idx, 
+                grandparent_idx, 
+                parent_idx, 
+                node_idx
+            );
+            
+            if (great_grandparent_idx != NODE_NULL) {
+                update_child_link(great_grandparent_idx, new_subtree_root);
+            } else {
+                root = new_subtree_root;  // New root
+            }
+            break;  // Fixed!
+        }
+    }
+    
+    // Ensure root is black
+    set_black(get_node(root));
+    return root;
+}
+```
+
+#### 4.3.3 Rotation Operations
+
+**Left Rotation:**
+```
+     |                    |
+     x                    y
+    / \    left_rot(x)   / \
+   a   y   =========>   x   c
+      / \              / \
+     b   c            a   b
+```
+
+**Right Rotation:**
+```
+     |                    |
+     y                    x
+    / \   right_rot(y)   / \
+   x   c  =========>    a   y
+  / \                      / \
+ a   b                    b   c
+```
+
+**Implementation leverages stack:**
+- Parent relationship already known (just popped from stack)
+- No need to search for parent or store parent pointers
+- Update great-grandparent's child link using stack
+
+#### 4.3.4 Performance Characteristics
+
+| Operation | Unbalanced BST | Red-Black Tree |
+|-----------|----------------|----------------|
+| Insert | O(1) to O(n) | O(log n) |
+| Search | O(1) to O(n) | O(log n) |  
+| Delete | O(1) to O(n) | O(log n) |
+| Space overhead | 0 bytes | 0 bytes (color bit stolen) |
+
+**Real-World Impact:**
+- Sequential allocations: O(n) → O(log n)
+- 1024 nodes: worst case 1024 ops → 20 ops
+- 4096 nodes: worst case 4096 ops → 24 ops
+
+**No space penalty!** Color bit fits in existing padding.
+
+### 4.4 Edge Cases & Test Strategy
 
 **Edge Case Categories:**
 

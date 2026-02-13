@@ -1,13 +1,13 @@
 # SigmaCore Memory - User's Guide
 
-**Version:** 0.1.0  
-**Date:** January 29, 2026
+**Version:** 0.2.0-alpha  
+**Date:** February 12, 2026
 
 ---
 
 ## Overview
 
-`sigma.memory` is a lightweight C memory allocator library with scope-based allocation. It provides:
+`sigma.memory` is a lightweight C memory allocator library with scope-based allocation and B-tree external metadata. It provides:
 
 - **Automatic initialization** via constructor (`__attribute__((constructor))`)
 - **Simple API** with `Allocator.alloc()` and `Allocator.dispose()`

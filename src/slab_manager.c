@@ -45,10 +45,10 @@ static sc_slab_array slab_array = {
     .end = 0,
 };
 // slab slotarray handle
-static slotarray slab_slots = NULL;
+static slotarray slab_table = NULL;
 
 #if 1  // Region: Utility Declarations
-slotarray init_slab_slot_array(parray);
+slotarray init_slab_table_array(parray);
 #endif
 
 #if 1  // Region: Slab Manager Methods
@@ -58,11 +58,11 @@ bool slab_manager_init_slab_array(void) {
     slab_array.end = Memory.get_slots_end();
 
     // zero the slots memory to ensure all slots start as ADDR_EMPTY
-    memset(slab_array.bucket, 0, SYS0_SLOTS_SIZE);
+    memset(slab_array.bucket, 0, SYS0_SLAB_TABLE_SIZE);
 
     // is there validation here?
-    slab_slots = init_slab_slot_array((parray)&slab_array);
-    if (slab_slots == NULL) {
+    slab_table = init_slab_table_array((parray)&slab_array);
+    if (slab_table == NULL) {
         goto exit;
     }
     success = true;
@@ -70,8 +70,8 @@ bool slab_manager_init_slab_array(void) {
 exit:
     return success;
 }
-addr slab_manager_get_slab_slot(usize slot_index) {
-    if (slab_slots == NULL || slot_index >= 16) {
+addr slab_manager_get_slab_entry(usize slot_index) {
+    if (slab_table == NULL || slot_index >= 16) {
         return ADDR_EMPTY;
     }
     addr value;
@@ -80,8 +80,8 @@ addr slab_manager_get_slab_slot(usize slot_index) {
     }
     return value;
 }
-bool slab_manager_set_slab_slot(usize slot_index, addr value) {
-    if (slab_slots == NULL || slot_index >= 16) {
+bool slab_manager_set_slab_entry(usize slot_index, addr value) {
+    if (slab_table == NULL || slot_index >= 16) {
         return false;
     }
     // Use PArray.set() on the underlying array
@@ -94,13 +94,13 @@ bool slab_manager_set_slab_slot(usize slot_index, addr value) {
 #if 1  // Region: Internal Slab Manager Interface
 const sc_slab_manager_i SlabManager = {
     .init_slab_array = slab_manager_init_slab_array,
-    .get_slab_slot = slab_manager_get_slab_slot,
-    .set_slab_slot = slab_manager_set_slab_slot,
+    .get_slab_entry = slab_manager_get_slab_entry,
+    .set_slab_entry = slab_manager_set_slab_entry,
 };
 #endif
 
 #if 1  // Region: Utility Definitions
-slotarray init_slab_slot_array(parray array) {
+slotarray init_slab_table_array(parray array) {
     slotarray slots = NULL;
     if (array == NULL) {
         goto exit;

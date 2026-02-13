@@ -1,0 +1,8 @@
+[2] Performance: Allocation Throughput :    4 : 2026-02-12  14:48:25            
+================================================================================
+Running: Benchmark: 64B allocations                            101.160 ms [PASS]
+Running: Benchmark: 1KB allocations                             54.794 ms [PASS]
+Running: Benchmark: 4KB allocations                              7.568 ms [PASS]
+Running: Benchmark: mixed sizes                                 16.118 ms [PASS]
+================================================================================
+[2]     TESTS=  4        PASS=  4        FAIL=  0        SKIP=  0

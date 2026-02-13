@@ -1,16 +1,17 @@
 # sigma.memory
 
-**Version:** 0.1.0  
-**Status:** Release
+**Version:** 0.2.0-alpha  
+**Status:** Alpha Release
 
-A lightweight C memory allocator with scope-based allocation for the SigmaCore framework.
+A lightweight C memory allocator with scope-based allocation and B-tree external metadata for the SigmaCore framework.
 
 ## Features
 
 - **Zero configuration** - Auto-initializes before `main()`
 - **Simple API** - `Allocator.alloc()` / `Allocator.dispose()`
-- **Scope-aware** - Polymorphic dispatch based on current scope
-- **64KB user pool** - 16 pages ready at startup
+- **B-tree metadata** - External allocation tracking, 100% page utilization
+- **Dynamic growth** - 2KB initial NodePool, grows to 32KB+
+- **Fast** - 1.5M-5.5M ops/sec, O(log n) operations
 
 ## Quick Start
 

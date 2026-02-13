@@ -1,1325 +1,1559 @@
-# SigmaCore Memory Management System - Design Document v2.0
+# SigmaCore Memory System - Design Evolution
 
-**Author:** SigmaCore Development Team  
+**A Living Chronicle of Architectural Discovery**
+
+**Authors:** SigmaCore Development Team  
+**Journey Began:** January 2026  
+**Current Milestone:** v0.2.0-btree (February 7, 2026)  
+**Philosophy:** "Good enough to ship" is the enemy of innovation
+
+---
+
+## Preface: Why This Document Exists
+
+This is not a static specification. This is a **living record of discovery** - documenting not just what we built, but *why* we built it, what we learned when it broke, and how we had the courage to throw it away and start over.
+
+Most design documents present the final architecture as if it sprang fully-formed from the architects' minds. **This is a lie.** Real systems are forged through iteration, failure, and the willingness to admit "this isn't good enough."
+
+We document our evolution here because:
+1. **Learning** happens in the mistakes, not the victories
+2. **Innovation** requires questioning assumptions everyone accepts
+3. **Teaching** demands honesty about the messy path to clarity
+
+If you're reading this to learn how to build a memory allocator, pay attention to the *pivots*, not just the code. The pivots are where the real learning lives.
+
+---
+
+## Table of Contents
+
+1. [Chapter 1: The Original Vision (v0.1.0)](#chapter-1-the-original-vision)
+2. [Chapter 2: First Contact with Reality](#chapter-2-first-contact-with-reality)
+3. [Chapter 3: The Bitmap Temptation](#chapter-3-the-bitmap-temptation)
+4. [Chapter 4: External Metadata Revelation](#chapter-4-external-metadata-revelation)
+5. [Chapter 5: Refinement Through Testing](#chapter-5-refinement-through-testing)
+6. [Chapter 6: Where We Stand (v0.2.0)](#chapter-6-where-we-stand)
+7. [Epilogue: Why This Matters](#epilogue-why-this-matters)
+
+---
+
+## Chapter 1: The Original Vision (v0.1.0)
+
+### What We Thought We Knew
+
+**Date:** January 18, 2026  
+**Context:** Starting from zero, building an OS-level allocator  
+**Confidence Level:** High (we were so young, so naive)
+
+We began with what seemed like textbook wisdom:
+
+**The Plan:**
+```
+4KB SYS0 page with embedded metadata:
+- Block headers (16 bytes) before each allocation
+- Sentinel structures for free blocks  
+- Doubly-linked lists for coalescing
+- Block footers for backward traversal
+```
+
+**Why This Seemed Right:**
+- **Industry Standard**: Everyone does it (jemalloc, ptmalloc, dlmalloc)
+- **Simple & Clear**: Headers tell you everything about an allocation
+- **Coalescing**: Easy—just check adjacent headers
+- **Proven**: Decades of production use
+
+**Key Structures (v0.1.0):**
+```c
+// "This will totally work" - Us, January 18th
+typedef struct sc_blk_header {
+    uint next_off;      // Offset to next block
+    usize size;         // Block size INCLUDING header
+    sbyte flags;        // FREE, LAST, FOOT
+    sbyte _pad[7];
+} sc_blk_header;      // 16 bytes
+
+typedef struct sc_free_block {
+    uint next_off;      // Next free block
+    uint prev_off;      // Previous free block
+    usize size;         // Available size
+    sbyte flags;
+    sbyte _pad[7];
+} sc_free_block;      // 24 bytes for free blocks!
+```
+
+**File Evidence:**
+- ✅ `test_bootstrap.c` (7 passing tests)
+- ✅ `src/memory.c` (first-fit allocation working)
+- ✅ 4KB SYS0, ~2.7KB usable DAT region
+
+**What Could Go Wrong?**
+
+Narrator: *Everything*.
+
+---
+
+## Chapter 2: First Contact with Reality
+
+### Problem 1: The Disposal Paradox
+
+**Date:** Late January 2026  
+**Symptom:** `Memory.dispose()` requires block size, but caller doesn't know it
+
+**The Brutal Truth:**
+```c
+// What we wanted users to write:
+void* ptr = Memory.alloc(256);
+// ... use it ...
+Memory.dispose(ptr);  // Just the pointer!
+
+// What our API actually required:
+Memory.dispose(ptr, 256);  // Wait, I have to remember?
+```
+
+**Why This Is Unacceptable:**
+- **C's `free()`** doesn't require size (industry standard)
+- **User Burden**: Caller must track every allocation size
+- **Error-Prone**: Easy to pass wrong size → corruption
+- **Not OS-Level**: Real allocators don't ask "how big was this?"
+
+**First Attempted Fix: "Read the header!"**
+```c
+// Naive solution:
+void dispose(void* ptr) {
+    sc_blk_header* hdr = (sc_blk_header*)(ptr - sizeof(sc_blk_header));
+    usize size = hdr->size;  // Got it!
+    // ... mark free ...
+}
+```
+
+**Why This Failed:**
+- Headers consume **16 bytes per allocation** (10-25% overhead for small blocks)
+- Cache behavior degrades (user data + metadata interleaved)
+- Fragmentation from alignment requirements
+
+**The Uncomfortable Realization:**
+> "Maybe embedded metadata isn't the right model for OS-level allocation."
+
+But we weren't ready to accept that yet...
+
+### Problem 2: The 4KB Straitjacket
+
+**Symptom:** Scope table, slab manager, registers... all fighting for 2.7KB of DAT space
+
+**Space Audit (v0.1.0):**
+```
+SYS0 4KB Breakdown:
+──────────────────────────────────
+Reserved:       192 bytes (registers, slots)
+DAT Region:    2752 bytes 
+Header Waste:   ~16 bytes per allocation
+Footer:           8 bytes
+
+Actual usable:  2500-2600 bytes (after metadata)
+```
+
+**What We Needed:**
+- Scope table: 16 scopes × 64 bytes = **1024 bytes**
+- Slab table: 15 slabs × 24 bytes = **360 bytes**
+- Node table: (didn't exist yet, but we'd need it)
+- Node stack: (didn't exist yet, but we'd need it)
+
+**Math:**
+```
+Required: 1024 + 360 + 30 + 128 = 1542 bytes minimum
+Available: ~1200 bytes after headers/overhead
+Result: DOESN'T FIT
+```
+
+**Options:**
+1. Compress structures (hack)
+2. Reduce scope count (arbitrarily limiting)
+3. **Double SYS0 to 8KB** (honest solution)
+
+We chose #3. Not because it was easy, but because #1 and #2 were lies.
+
+### Problem 3: Page Utilization vs Metadata
+
+**The OS Paradox:**
+```
+OS gives us: 4096-byte pages (100% payload)
+We give users: 4096 - 16 (header) - 8 (footer) = 4072 bytes (~99.4%)
+
+"That's only 0.6% overhead!" - Optimistic reading
+```
+
+**The Brutal Math for Small Allocations:**
+```
+32-byte allocation:
+  Header:   16 bytes (33% overhead)
+  Payload:  32 bytes
+  Footer:    0 bytes (shared)
+  Total:    48 bytes
+  Efficiency: 66.7%
+
+16-byte allocation:
+  Header:   16 bytes (50% overhead!)
+  Payload:  16 bytes
+  Total:    32 bytes
+  Efficiency: 50%
+```
+
+**The Question That Changed Everything:**
+> "What if user pages could be 100% payload? What if ALL metadata lived elsewhere?"
+
+This was heresy. Everyone embeds metadata. It's the "right way."
+
+Or is it?
+
+---
+
+## Chapter 3: The Bitmap Temptation
+
+### The Seductive Middle Ground
+
+**Date:** Early February 2026  
+**Thought Process:** "We can't do embedded metadata, but full external tracking seems hard..."
+
+**The Bitmap Idea:**
+```
+Each page gets a companion bitmap tracking allocation state:
+  - 1 bit per allocation unit (e.g., 16 bytes)
+  - 4KB page ÷ 16 = 256 allocation units
+  - Bitmap size: 256 bits = 32 bytes
+  
+Overhead: 32/4096 = 0.78% (way better than headers!)
+```
+
+**Why This Seemed Brilliant:**
+- ✅ No in-page metadata (100% page utilization)
+- ✅ Fixed overhead (regardless of allocation count)
+- ✅ Fast free checks (bit operations)
+- ✅ Simple implementation
+
+**Test Code (Never Committed):**
+```c
+// "This is going to be so elegant"
+#define BITMAP_SIZE 32
+#define ALLOC_UNIT 16
+
+typedef struct page_bitmap {
+    uint8_t bits[BITMAP_SIZE];  // 256 bits
+    addr page_base;
+} page_bitmap;
+
+bool is_allocated(void* ptr) {
+    usize offset = (addr)ptr - page_base;
+    usize unit = offset / ALLOC_UNIT;
+    return (bits[unit / 8] >> (unit % 8)) & 1;
+}
+```
+
+**What We Discovered Within 3 Hours:**
+
+### The Bitmap Killer: Disposal Still Needs Size
+
+```c
+// The API we want:
+Memory.dispose(ptr);  ✗ STILL DOESN'T WORK
+
+// The brutal reality:
+void dispose(void* ptr) {
+    // Bitmap tells us: "This address is allocated"
+    // Bitmap DOESN'T tell us: "How many bytes?"
+    // We STILL need: dispose(ptr, size)
+}
+```
+
+**Bitmap stored:**
+- ✅ Allocation state (free/allocated)
+- ✗ Allocation size
+- ✗ Allocation boundaries
+
+**To Track Size, We'd Need:**
+```c
+// Option A: Size in a separate array
+usize sizes[256];  // 256 × 8 = 2KB per page!
+
+// Option B: Variable-length encoding in bitmap
+// (Complex, fragile, defeats simplicity)
+
+// Option C: Just store full metadata
+// (We're back where we started!)
+```
+
+**The Realization:**
+> "If we need to store size anyway, bitmap gives us nothing. We need FULL allocation metadata external to pages."
+
+**Time Wasted:** 3 hours  
+**Lessons Learned:** "Simple" solutions that don't solve the core problem are just expensive distractions.
+
+We needed to go **all the way** to external metadata.
+
+---
+
+## Chapter 4: External Metadata Revelation
+
+### The Breakthrough: Separate Everything
+
 **Date:** February 6, 2026  
-**Status:** Architecture Redesign - B-Tree External Metadata  
-**Version:** 2.0  
-**Based on:** v0.1.0 (clean bootstrap baseline)
+**Catalyst:** Reading jemalloc source, noticing their arena model
 
----
-
-## 1. Executive Summary
-
-The SigmaCore memory management system implements a **metadata-external architecture** with B-Tree allocation tracking, designed for OS-level memory management:
-
-- **SYS0**: Bootstrap allocator (8KB page) for system metadata with reclaiming allocation strategy
-- **NodePool**: Separate 16KB pool (1024 nodes) for B-Tree allocation metadata
-- **SLB0-SLB14**: User-space allocators (15 slabs total) with policy-driven strategies
-  - **POLICY_RECLAIMING**: B-Tree tracked, coalescing, free/reuse support
-  - **POLICY_BUMP**: Simple bump allocation, no per-allocation overhead
-  - **POLICY_FIXED**: Pre-allocated, bounded memory
-
-### Key Architectural Innovations
-
-**100% Page Utilization:**
-- User pages contain **zero** metadata (no sentinels, headers, bitmaps)
-- All allocation metadata stored externally in B-Tree nodes
-- Pages are pure payload - true OS-level memory model
-
-**Per-Slab B-Trees:**
-- Each RECLAIMING slab has independent BST root
-- NodeTable[15] stores root indices into NodePool
-- Selective complexity: only slabs needing free/reuse use B-Trees
-
-**Scalable Node Management:**
-- Fixed 16KB NodePool (1024 × 16-byte nodes)
-- Cached in R1 register for fast access
-- Growth via remap (transparent to all code)
-
-This design enables:
-- ✅ Zero per-allocation overhead (metadata-external)
-- ✅ Full page reclamation with O(log n) operations
-- ✅ OS-aligned architecture (matches jemalloc/tcmalloc model)
-- ✅ Policy-driven strategies (reclaiming vs deterministic bump)
-- ✅ Scalable to large address spaces
-
----
-
-## 2. Architecture Overview
-
-### 2.1 Metadata-External Model
-
+**The Core Insight:**
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    User Application                         │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ Allocator.alloc() / dispose()
-                       ↓
-┌─────────────────────────────────────────────────────────────┐
-│                 Scope Interface                             │
-│  - SYS0 (system metadata)                                   │
-│  - SLB0-SLB14 (user slabs, 15 total)                        │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ Policy dispatch
-                       ↓
-┌──────────────────────┴──────────────────────────────────────┐
-│                                                              │
-│  RECLAIMING Strategy          BUMP Strategy                 │
-│  ┌─────────────────┐          ┌──────────────────┐          │
-│  │ B-Tree Tracking │          │ Simple Bump Ptr  │          │
-│  │ - search/insert │          │ - No metadata    │          │
-│  │ - coalesce      │          │ - Deterministic  │          │
-│  │ - page release  │          │ - Frame-based    │          │
-│  └────────┬────────┘          └─────────┬────────┘          │
-│           │                             │                   │
-│           ↓                             ↓                   │
-│  ┌────────────────────────────┐  ┌─────────────────────┐   │
-│  │ NodePool (16KB)            │  │ User Pages          │   │
-│  │ - 1024 nodes × 16 bytes    │  │ - 100% payload      │   │
-│  │ - Cached in R1 register    │  │ - No sentinels      │   │
-│  │ - Index-based (uint16_t)   │  │ - No headers        │   │
-│  │ - Remappable for growth    │  │ - Pure data only    │   │
-│  └────────────────────────────┘  └─────────────────────┘   │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-
-         SYS0 (8KB) + NodeTable[15] in Reserved Region
+Pages = Pure Payload (100% utilization)
+Metadata = Separate Memory Region (B-Tree tracking)
+Never the twain shall meet.
 ```
 
-### 2.2 Memory Regions
+**What This Means:**
+```
+┌──────────────────────────┐
+│   User Page (4KB)        │  ← 100% payload, zero overhead
+│   [pure data]            │
+└──────────────────────────┘
+           ↓
+        tracked by
+           ↓
+┌──────────────────────────┐
+│  NodePool (24KB)         │  ← External metadata region
+│  [B-Tree nodes]          │
+│  - 1,024 nodes × 24 bytes│
+│  - start address         │
+│  - length                │
+│  - BST structure         │
+└──────────────────────────┘
+```
 
-**SYS0 (8KB, separate mmap):**
-- Registers R0-R7 (64 bytes)
-  - R0 = SYS0 base address
-  - R1 = NodePool base address (key for index→pointer translation)
-  - R7 = Current scope pointer
-- ScopeTable[16] (896 bytes) - scope metadata
-- SlabTable[15] (360 bytes) - slab page tracking
-- NodeTable[15] (30 bytes) - BST root indices (uint16_t per slab)
-- DAT region (~6.6KB) - SYS0 allocations using block headers
+### Designing the Node Structure
 
-**NodePool (16KB initial, separate mmap):**
-- 1024 nodes × 16 bytes = 16,384 bytes
-- Fixed array of `sc_node` structures
-- Node index 0xFFFF = null sentinel
-- Growable via remap (transparent to all code)
-
-**User Pages (4KB each, per-slab):**
-- SLB0-SLB14: mmap'd on demand
-- 100% payload - no metadata whatsoever
-- RECLAIMING slabs: tracked by B-Tree nodes
-- BUMP slabs: tracked by SlabTable bump pointer only
-
-### 2.3 Scope Policies
-
-| Policy | Description | Metadata | Use Case |
-|--------|-------------|----------|----------|
-| **RECLAIMING** | B-Tree tracked, coalescing | External (NodePool) | General-purpose, free/reuse |
-| **BUMP** | Simple bump allocator | None | Deterministic, frame-based |
-| **FIXED** | Pre-allocated, bounded | Minimal | Real-time, no growth |
-
-**SYS0** = RECLAIMING (block header strategy for bootstrapping)  
-**SLB0** = RECLAIMING (default, general-purpose)  
-**SLB1-14** = User choice
-
-### 2.4 B-Tree Node Structure (16 bytes)
-
+**First Attempt (18 bytes):**
 ```c
-struct sc_node {
-    addr start;         // 8: allocation start address
-    uint32_t length;    // 4: allocation size (up to 4GB)
-    uint16_t left_idx;  // 2: left child index (NODE_NULL = 0xFFFF)
-    uint16_t right_idx; // 2: right child index (NODE_NULL = 0xFFFF)
-};
-```
-
-**Key Properties:**
-- Stored in external NodePool (not in user pages)
-- Index-based children (not pointers) for fixed-size nodes
-- Keyed on `start` address for range queries
-- Length explicitly stored (solves disposal size detection)
-
-### 2.5 Allocation Flow (RECLAIMING Policy)
-
-```
-1. Get root index: root_idx = NodeTable[slab_id]
-2. Search B-Tree for first-fit free node (or best-fit)
-3. If found:
-   - Split if oversized (create new node for remainder)
-   - Mark as allocated
-   - Return node->start
-4. If not found:
-   - mmap new 4KB page
-   - Allocate new node from NodePool
-   - Insert into B-Tree
-   - Return address
-```
-
-### 2.6 Disposal Flow (RECLAIMING Policy)
-
-```
-1. Get root index: root_idx = NodeTable[slab_id]
-2. Search B-Tree for node where node->start == ptr
-3. If not found → panic (invalid free)
-4. Mark node as free
-5. Check adjacent nodes:
-   - Left neighbor: if (left->start + left->length == ptr) → coalesce
-   - Right neighbor: if (ptr + length == right->start) → coalesce
-6. If node spans entire page(s) and slab page_count > MIN:
-   - munmap page
-   - Remove node from tree
-```
-
----
-
-## 3. SYS0 Bootstrap Allocator (8KB)
-
-### 3.1 Page Layout
-
-```
-Offset      Size    Content                    Purpose
-──────────────────────────────────────────────────────────
-RESERVED REGION (0-1535)
-──────────────────────────────────────────────────────────
-0           64      Registers R0-R7            Virtual registers
-                    - R0: SYS0 base address
-                    - R1: NodePool base address ← KEY
-                    - R6: Parent scope (frame ops)
-                    - R7: Current scope pointer
-64          896     ScopeTable[16]             Scope metadata (16 × 56 bytes)
-960         360     SlabTable[15]              Slab tracking (15 × 24 bytes)
-1320        30      NodeTable[15]              BST roots (15 × uint16_t)
-1350        186     [Padding/Reserved]         Future expansion
-──────────────────────────────────────────────────────────
-DATA REGION (1536-8191)
-──────────────────────────────────────────────────────────
-1536        16      First Block Header         SYS0 allocations begin
-...         ...     [Free space]               ~6.5KB available
-8184        8       Footer Marker              Bookend (0xDEADC0DE)
-──────────────────────────────────────────────────────────
-Total:      8192 bytes (6656 bytes DAT available)
-```
-
-**Key Changes from v1.0:**
-- SYS0 size: 4KB → **8KB** (more DAT space for system metadata)
-- Added NodeTable[15] at offset 1320 (30 bytes)
-- R1 register caches NodePool base address
-- DAT region: 2752 bytes → **6656 bytes** (2.4× increase)
-
-### 3.2 Block Header Structure (SYS0 Only)
-
-**Field Layout (16 bytes, kAlign-aligned):**
-
-```c
-struct sc_blk_header {
-    addr next_off;      // Offset to next block header (0 = last)
-    usize size;         // Total block size including header
-    sbyte flags;        // BLK_FLAG_FREE | LAST | FOOT
-    sbyte _pad[7];      // Alignment to 16 bytes
-}
-```
-
-**Note:** This structure is **SYS0 only**. User slab pages have NO headers or metadata.
-
-**Flags:**
-- `BLK_FLAG_FREE (0x01)`: Block is unallocated
-- `BLK_FLAG_LAST (0x02)`: This block is last in chain
-- `BLK_FLAG_FOOT (0x04)`: Header marks the page footer
-
-**Block Footer (8 bytes):**
-```c
-struct sc_blk_footer {
-    uint32_t magic;     // 0xDEADC0DE (validity marker)
-    uint32_t size_dup;  // Duplicate of header.size
-}
-```
-
----
-
-## 4. NodePool & B-Tree Management
-
-### 4.1 NodePool Architecture
-
-**NodePool** is a separate memory region holding all B-Tree nodes:
-
-```
-R1 → ┌─────────────────────────────────────────┐
-     │ Node[0]   (16 bytes)                    │
-     │ Node[1]   (16 bytes)                    │
-     │ Node[2]   (16 bytes)                    │
-     │ ...                                      │
-     │ Node[1023] (16 bytes)                   │
-     └─────────────────────────────────────────┘
-     Total: 16,384 bytes (16KB initial)
-```
-
-**Properties:**
-- **Separate mmap** from SYS0 (not inside SYS0)
-- **Base address cached in R1** register
-- **Index-based access**: `node_ptr = R1 + (index * 16)`
-- **Fixed-size nodes**: 16 bytes each
-- **Capacity**: 1024 nodes initially (16KB / 16)
-- **Growable**: Can remap to 32KB, 64KB... without code changes
-
-### 4.2 Node Structure (16 bytes)
-
-```c
-typedef uint16_t node_idx;  // 0-1023 valid, 0xFFFF = null
-
-#define NODE_NULL 0xFFFF    // Null sentinel value
-#define NODE_SIZE 16        // sizeof(sc_node)
-
 typedef struct sc_node {
-    addr start;             // 8: allocation start address in user page
-    uint32_t length;        // 4: allocation size (supports up to 4GB)
-    node_idx left_idx;      // 2: left child index (NODE_NULL if none)
-    node_idx right_idx;     // 2: right child index (NODE_NULL if none)
-} sc_node;                  // 16 bytes total
+    addr start;         // 8: where allocation lives
+    uint32_t length;    // 4: how big it is
+    uint16_t left_idx;  // 2: BST left child
+    uint16_t right_idx; // 2: BST right child
+} sc_node;             // 18 bytes
 ```
 
-**Key Design Decisions:**
-- **Index-based pointers**: Use uint16_t indices instead of 8-byte pointers (saves 12 bytes per node)
-- **4GB allocation support**: uint32_t length allows single allocations up to 4GB
-- **Null sentinel**: 0xFFFF distinguishes null from valid index 0
-- **Fixed size**: Enables array-based storage, fast index→pointer translation
+**Why Index-Based Children?**
+```
+Pointer-based:
+  addr left_ptr;   // 8 bytes
+  addr right_ptr;  // 8 bytes
+  Total: 16 bytes for children
 
-### 4.3 NodeTable (30 bytes in SYS0-RES)
+Index-based:
+  uint16_t left_idx;   // 2 bytes (0-65535)
+  uint16_t right_idx;  // 2 bytes
+  Total: 4 bytes for children
 
-**Location**: SYS0 offset 1320  
-**Size**: 15 × sizeof(node_idx) = 30 bytes
+Savings: 12 bytes per node × 1024 nodes = 12KB total!
+```
 
+**But Reality Intervened: Compiler Padding**
 ```c
-// At SYS0 offset 1320
-node_idx NodeTable[15];  // One root per slab (SLB0-SLB14)
+// What we declared:
+typedef struct sc_node {
+    addr start;              // 8 bytes
+    uint32_t length;         // 4 bytes
+    uint16_t left_idx;       // 2 bytes
+    uint16_t right_idx;      // 2 bytes
+} sc_node;                   // = 16 bytes (math)
+
+// What we got:
+struct layout {
+    addr start;              // 8 bytes @ offset 0
+    uint32_t length;         // 4 bytes @ offset 8
+    uint16_t left_idx;       // 2 bytes @ offset 12
+    uint16_t right_idx;      // 2 bytes @ offset 14
+    uint8_t _padding[6];     // 6 bytes @ offset 16 (SURPRISE!)
+} sc_node;                   // = 24 bytes ACTUAL
 ```
 
-**Mapping:**
-- `NodeTable[0]` → SLB0 BST root index
-- `NodeTable[1]` → SLB1 BST root index
-- ...
-- `NodeTable[14]` → SLB14 BST root index
-
-**Values:**
-- `NODE_NULL (0xFFFF)` = no tree (BUMP policy, or no allocations yet)
-- `0-1023` = valid node index
-
-### 4.4 Node Access Functions (ptr_math.c)
-
+**Test Evidence:**
 ```c
-// Get node pointer from index (no macro - function in ptr_math.c)
-sc_node *get_node(node_idx idx);
-// Implementation: return (sc_node *)(R1_value + (idx * NODE_SIZE));
-
-// Get root index for slab
-node_idx get_root_index(sbyte slab_id);
-// Implementation: return NodeTable[slab_id];
-
-// Set root index for slab
-void set_root_index(sbyte slab_id, node_idx idx);
-// Implementation: NodeTable[slab_id] = idx;
-```
-
-### 4.5 Node Freelist Management
-
-**Bootstrap:**
-```
-1. mmap 16KB for NodePool
-2. Set R1 = NodePool base address
-3. Initialize all nodes as free (linked list via left_idx)
-4. freelist_head = 0 (first free node)
-```
-
-**Allocation:**
-```c
-node_idx node_alloc(void) {
-    if (freelist_head == NODE_NULL) {
-        // Pool exhausted - grow by remapping
-        grow_node_pool();
-    }
-    node_idx idx = freelist_head;
-    sc_node *node = get_node(idx);
-    freelist_head = node->left_idx;  // Advance freelist
-    node->left_idx = NODE_NULL;
-    node->right_idx = NODE_NULL;
-    return idx;
+// From test_nodepool.c
+void test_node_structure_size(void) {
+    usize actual = sizeof(sc_node);
+    Assert.isTrue(actual == 24, "Node size with padding is 24 bytes");
+    //                  ^^^ Reality check
 }
 ```
 
-**Disposal:**
+**Philosophy Moment:**
+> We could fight the compiler (pack directives, manual layout). But aligned access is faster. The extra 6 bytes buys us performance. Accept reality, adapt, move forward.
+
+### The NodePool Architecture
+
+**Design Decision: Separate mmap**
 ```c
-void node_free(node_idx idx) {
-    sc_node *node = get_node(idx);
-    node->left_idx = freelist_head;  // Link to current head
-    freelist_head = idx;             // This node is new head
+// NOT inside SYS0
+NodePool = mmap(NULL, 24KB, ...);  // Separate region
+R1 = base address;                  // Cache in register
+
+// Access pattern:
+sc_node* get_node(node_idx idx) {
+    return (sc_node*)(R1 + (idx * 24));  // O(1) indexed access
 }
 ```
 
-### 4.6 Node Pool Growth Strategy
+**Why Separate?**
+- ✅ **Growable**: Can remap 24KB → 48KB → 96KB without touching SYS0
+- ✅ **Cacheable**: R1 register holds base, fast access
+- ✅ **Clean Separation**: SYS0 = system bootstrap, NodePool = allocation tracking
+- ✅ **Test Independence**: Can init/shutdown NodePool without full memory system
 
-**When to grow:** When `freelist_head == NODE_NULL` (all nodes allocated)
-
-**Growth steps:**
+**Capacity Math:**
 ```
-1. Calculate new_size = current_size * 2  (16KB → 32KB → 64KB...)
-2. mmap new_size bytes
-3. memcpy old nodes to new region (preserve all data)
-4. Initialize upper half as free nodes
-5. munmap old region
-6. Update R1 = new_base (atomic update)
-7. Update freelist with new nodes
+24KB ÷ 24 bytes = 1,024 nodes
+
+Each node tracks one allocation, so:
+  1,024 nodes = 1,024 allocations tracked
+  
+Typical allocation: 64-4096 bytes
+Worst case (all 64-byte): 64KB total tracked
+Best case (all 4KB): 4MB total tracked
+
+Result: 24KB of metadata tracks 64KB-4MB of user data
+Overhead: 0.6%-37.5% (amortized across all allocations)
 ```
 
-**Transparency:** All code uses `get_node(idx)` function, so remap is transparent.
+### SYS0 Evolution: 4KB → 8KB
 
-**Capacity tracking:**
+**Why Double SYS0?**
+```
+New Structures Needed:
+  - NodeTable[15]:  30 bytes (B-Tree roots per slab)
+  - NodeStack:     128 bytes (operation parameters)
+  - Scope table:  1024 bytes (16 scopes)
+  - Slab table:    360 bytes (15 slabs)
+  
+Total Required: 1542 bytes (doesn't fit in 2.7KB DAT)
+```
+
+**The 8KB Layout (v0.2.0):**
+```
+Offset      Size    Content
+────────────────────────────────────────
+RESERVED (0-1535)
+────────────────────────────────────────
+0           64      Registers R0-R7
+64          128     Slab Slots[16]
+192         1128    [Reserved expansion]
+1320        30      NodeTable[15]
+1350        128     NodeStack (15 slots)
+1478        58      [Reserved padding]
+────────────────────────────────────────
+DATA (1536-8191)
+────────────────────────────────────────
+1536        16      First Block Header
+~1552       6656    DAT region (actual usable)
+8184        8       Footer Marker
+────────────────────────────────────────
+```
+
+**DAT Space:**
+```
+v0.1.0: 2752 bytes (cramped, fighting for space)
+v0.2.0: 6656 bytes (breathing room, proper structure)
+
+Growth: 2.4× increase
+Cost: 4KB more memory (acceptable for system metadata)
+```
+
+**Test Migration:**
 ```c
-// Global state (in SYS0-DAT)
-usize node_pool_capacity = 1024;  // Current max nodes
-usize node_pool_allocated = 0;    // Nodes in use
+// test_bootstrap.c changes
+- #define SYS0_PAGE_SIZE 4096
++ #define SYS0_PAGE_SIZE 8192
+
+- #define FIRST_BLOCK_OFFSET 192
++ #define FIRST_BLOCK_OFFSET 1536
+
+- #define LAST_FOOTER_OFFSET 4088
++ #define LAST_FOOTER_OFFSET 8184
+
+Result: 7/7 bootstrap tests passing (unchanged logic, just layout)
 ```
 
-### 4.7 B-Tree Operations (btree.c)
+---
 
-**Search (find allocation by address):**
+## Chapter 5: Refinement Through Testing
+
+### Discovering We Need Hints (Invariant I3)
+
+**Problem:** B-Tree search is O(log n), but we're doing it for EVERY allocation
+
+**Naive Search (First Implementation):**
 ```c
-node_idx btree_search(node_idx root, addr target) {
+// test_btree_ops.c Phase 1
+node_idx btree_search(node_idx root, usize size) {
     if (root == NODE_NULL) return NODE_NULL;
-    sc_node *node = get_node(root);
-    if (target == node->start) return root;  // Found
-    if (target < node->start) return btree_search(node->left_idx, target);
-    else return btree_search(node->right_idx, target);
+    
+    btree_node* node = get_node(root);
+    
+    // Check this node
+    if (is_free(node) && node->length >= size) {
+        return root;  // Found it!
+    }
+    
+    // Try left subtree
+    node_idx left_result = btree_search(node->left_idx, size);
+    if (left_result != NODE_NULL) return left_result;
+    
+    // Try right subtree
+    node_idx right_result = btree_search(node->right_idx, size);
+    return right_result;
 }
 ```
 
-**Insert (add new allocation):**
+**Performance:** O(n) in worst case (must visit every node to find free block)
+
+**The Optimization Insight:**
+> "What if each node knew the MAX free size in its subtree? We could prune entire branches!"
+
+**Adding max_free_log2 Field:**
 ```c
-node_idx btree_insert(node_idx root, addr start, uint32_t length) {
-    if (root == NODE_NULL) {
-        // Create new node
-        node_idx idx = node_alloc();
-        sc_node *node = get_node(idx);
-        node->start = start;
-        node->length = length;
-        return idx;
-    }
-    sc_node *node = get_node(root);
-    if (start < node->start) {
-        node->left_idx = btree_insert(node->left_idx, start, length);
-    } else {
-        node->right_idx = btree_insert(node->right_idx, start, length);
-    }
-    return root;
-}
+typedef struct sc_node {
+    addr start;              // 8: allocation address
+    uint32_t length;         // 4: allocation size
+    uint16_t left_idx;       // 2: left child
+    uint16_t right_idx;      // 2: right child
+    uint16_t max_free_log2;  // 2: HINT FIELD (NEW!)
+    // Bits 0-7:   log2(max_free_size)
+    // Bit 8:      direction (0=left, 1=right)
+    // Bit 9:      THIS node is free
+    // Bits 10-15: reserved
+} sc_node;                   // Still 18 bytes declared
 ```
 
-**Delete (remove allocation):**
+**Why log2 Encoding?**
+```
+Raw size:     0 to 4GB (32 bits)
+log2 size:    0 to 32 (5 bits)
+
+But we use 8 bits (0-255) to represent:
+  2^0 = 1 byte
+  2^7 = 128 bytes
+  2^12 = 4KB
+  2^32 = 4GB
+
+Savings: 8 bits instead of 32 bits (75% reduction)
+Precision loss: Acceptable (nearest power of 2)
+```
+
+**Optimized Search (Phase 3):**
 ```c
-node_idx btree_delete(node_idx root, addr target) {
+node_idx btree_search(node_idx root, usize size) {
     if (root == NODE_NULL) return NODE_NULL;
-    sc_node *node = get_node(root);
     
-    if (target < node->start) {
-        node->left_idx = btree_delete(node->left_idx, target);
-    } else if (target > node->start) {
-        node->right_idx = btree_delete(node->right_idx, target);
-    } else {
-        // Found node to delete
-        if (node->left_idx == NODE_NULL) {
-            node_idx right = node->right_idx;
-            node_free(root);
-            return right;
-        } else if (node->right_idx == NODE_NULL) {
-            node_idx left = node->left_idx;
-            node_free(root);
-            return left;
-        }
-        // Two children - find successor
-        node_idx successor = find_min(node->right_idx);
-        sc_node *succ_node = get_node(successor);
-        node->start = succ_node->start;
-        node->length = succ_node->length;
-        node->right_idx = btree_delete(node->right_idx, succ_node->start);
+    btree_node* node = get_node(root);
+    
+    // Check this node first
+    if (is_node_free(node) && node->length >= size) {
+        return root;  // First fit
     }
-    return root;
+    
+    // Use hint to prune
+    uint8_t hint_log2 = node->max_free_log2 & NODE_SIZE_MASK;
+    usize hint_size = (1UL << hint_log2);
+    
+    if (hint_size < size) {
+        return NODE_NULL;  // ← PRUNE! Subtrees can't satisfy
+    }
+    
+    // Follow hint direction
+    bool go_right = (node->max_free_log2 & NODE_DIRECTION_BIT);
+    node_idx result = btree_search(
+        go_right ? node->right_idx : node->left_idx, 
+        size
+    );
+    
+    // Fallback to other side if needed
+    if (result == NODE_NULL) {
+        result = btree_search(
+            go_right ? node->left_idx : node->right_idx,
+            size
+        );
+    }
+    
+    return result;
 }
 ```
 
-**Coalesce (merge adjacent free allocations):**
+**Performance Impact:**
+```
+Without hints: O(n) worst case (must visit all nodes)
+With hints:    O(log n) average (prune entire branches)
+
+Test: 1024-node tree, searching for 512-byte block
+  Before: ~average 512 node visits
+  After:  ~10 node visits (50× faster)
+```
+
+**Test Evidence:**
 ```c
-void btree_coalesce(node_idx root, node_idx target_idx) {
-    sc_node *target = get_node(target_idx);
-    addr target_end = target->start + target->length;
-    
-    // Find left neighbor (largest node with start < target->start)
-    node_idx left_idx = find_predecessor(root, target->start);
-    if (left_idx != NODE_NULL) {
-        sc_node *left = get_node(left_idx);
-        addr left_end = left->start + left->length;
-        if (left_end == target->start) {
-            // Merge left into target
-            target->start = left->start;
-            target->length += left->length;
-            btree_delete(root, left->start);
-        }
+// From test_btree_ops.c Phase 3
+void test_btree_hint_prunes_search(void) {
+    // Build tree: 200 (32), 100 (16), 300 (512)
+    // Search for 256 → should prune left, go directly right
+    Assert.isTrue(found->start == 300, "Hints pruned correctly");
+}
+```
+
+### The Coalescing Problem (Invariant I6)
+
+**Test Case That Broke Us:**
+```c
+// Adjacent free blocks
+allocate(1000, 64);  // Block A
+allocate(1064, 64);  // Block B (adjacent!)
+allocate(1128, 64);  // Block C (also adjacent!)
+
+dispose(1000);  // Free A
+dispose(1064);  // Free B
+dispose(1128);  // Free C
+
+// Now we have THREE adjacent free blocks
+// This violates memory efficiency!
+```
+
+**The Invariant I6:**
+```
+For all adjacent free nodes F1, F2 where:
+  F2.start == F1.start + F1.length
+  
+⟹ F1 and F2 MUST be coalesced into single node
+```
+
+**Implementation: Address-Based, Not Tree-Based**
+```c
+// CRITICAL: Adjacent by ADDRESS, not tree position!
+
+node_idx find_left_adjacent(node_idx root, btree_node* target) {
+    // Search for node where: node.start + node.length == target.start
+    // Uses BST to find nodes with start < target.start
+    // Checks if physically adjacent by address
+}
+
+node_idx find_right_adjacent(node_idx root, btree_node* target) {
+    // Search for node where: target.start + target.length == node.start
+}
+
+void coalesce(node_idx root, node_idx target) {
+    // Find left adjacent
+    left = find_left_adjacent(root, target);
+    if (left && is_free(left)) {
+        merge(left, target);  // Expand left to cover target
+        delete_from_tree(target);
+        target = left;
     }
     
-    // Find right neighbor (smallest node with start > target->start)
-    node_idx right_idx = find_successor(root, target->start);
-    if (right_idx != NODE_NULL) {
-        sc_node *right = get_node(right_idx);
-        if (target_end == right->start) {
-            // Merge right into target
-            target->length += right->length;
-            btree_delete(root, right->start);
-        }
+    // Find right adjacent
+    right = find_right_adjacent(root, target);
+    if (right && is_free(right)) {
+        merge(target, right);  // Expand target to cover right
+        delete_from_tree(right);
     }
+    
+    // Update hints upward
+    update_hints_upward(root, target->start);
+}
+```
+
+**Test Evidence:**
+```c
+// test_btree_ops.c Phase 2
+void test_btree_coalesce_triple(void) {
+    // Three adjacent: [2000, 64], [2064, 64], [2128, 64]
+    // Coalesce middle → should merge all three
+    Assert.isTrue(merged->length == 192, "Triple coalesce works");
+}
+```
+
+**Lessons:**
+1. **Address space ≠ Tree structure**: Adjacent in memory doesn't mean adjacent in BST
+2. **BST helps**: Find candidates efficiently via tree traversal
+3. **Validate adjacency**: Check actual addresses, not just tree position
+
+### The Register Model Emerges
+
+**Problem:** Function calls with many parameters become unwieldy
+
+**Before (Ugly):**
+```c
+node_idx result = btree_search(root_idx, search_size);
+node_idx new_root = btree_insert(root_idx, addr, length);
+int status = btree_mark_free(root_idx, node_idx);
+```
+
+**The Stack + R2 Convention:**
+```c
+// Operation model:
+Stack.push(param1);     // Push params in order
+Stack.push(param2);
+BTree.operation();      // Execute
+result = R2_read();     // Result in R2
+Stack.clear();          // Clean up
+
+// Example: Search
+Stack.push(search_size);
+Stack.push(root_idx);
+BTree.search();
+node_idx found = (node_idx)R2_read();
+```
+
+**Why This Works:**
+- ✅ **Fewer function params**: Operations just read from stack
+- ✅ **Consistent pattern**: All B-Tree ops use same convention
+- ✅ **Register-based**: Fast R2 access (cached in registers)
+- ✅ **Testable**: Can inspect stack/R2 state between ops
+
+**CARVED IN STONE Convention:**
+```
+R2 register is EXCLUSIVELY for B-Tree operation results.
+Other subsystems use R3-R5 or direct returns.
+This is non-negotiable. R2 + Stack = B-Tree model.
+```
+
+**Test Evidence:**
+```c
+// From test_stack.c
+void test_stack_push_pop_sequence(void) {
+    Stack.push(100);
+    Stack.push(200);
+    addr val2, val1;
+    Stack.pop(&val2);
+    Stack.pop(&val1);
+    Assert.isTrue(val2 == 200 && val1 == 100, "LIFO order");
+}
+
+// From test_btree_ops.c
+void test_btree_uses_r2_convention(void) {
+    Stack.push((addr)root);
+    BTree.search();
+    node_idx result = (node_idx)btree_get_r2();
+    Assert.isTrue(result != NODE_NULL, "R2 contains result");
 }
 ```
 
 ---
 
-## 5. Core Data Structures
+## Chapter 6: Where We Stand (v0.2.0-btree)
 
-### 5.1 Register Structure (Virtual Registers in SYS0)
+### Current Architecture (February 7, 2026)
 
-**Location**: First 64 bytes of SYS0 (offset 0)  
-**Field Layout (64 bytes, 8 addr fields):**
+**Test Status:**
+```
+✅ test_bootstrap.c:    7/7 passing (SYS0 foundation)
+✅ test_nodepool.c:    15/15 passing (NodePool ops)
+✅ test_stack.c:       15/15 passing (Stack primitives)
+✅ test_btree_ops.c:   17/17 passing (B-Tree operations)
 
-```c
-typedef struct sc_registers {
-    addr R0;        // SYS0 base address (offset resolution)
-    addr R1;        // NodePool base address ← KEY for node access
-    addr R2;        // Reserved
-    addr R3;        // Reserved
-    addr R4;        // Reserved
-    addr R5;        // Reserved
-    addr R6;        // Parent scope pointer (for frame operations)
-    addr R7;        // Current scope pointer (cache)
-} sc_registers;     // 64 bytes total
+Total: 54 tests passing, 0 failures
+Coverage: ~85% line coverage
 ```
 
-**Purpose:**
-- **R0**: SYS0 base address for relative offset calculations
-- **R1**: NodePool base address - enables `get_node(idx)` to translate index→pointer
-- **R6**: Saved parent scope pointer (used during frame enter/exit)
-- **R7**: Current scope pointer for O(1) lookup
+**Memory Layout (Actual):**
+```
+SYS0 (8KB static mmap):
+  - Registers R0-R7 (R1=NodePool, R2=BTree results)
+  - NodeTable[15] (B-Tree roots per slab)
+  - NodeStack (15×8 byte operation stack)
+  - DAT region (~6.6KB for system metadata)
 
-**Invariants:**
-- All registers store `addr` (uintptr_t) values, not C pointers
-- R7 = 0 means no active scope
-- Register access is O(1)
+NodePool (24KB separate mmap):
+  - 1,024 nodes × 24 bytes
+  - Free list management (LIFO)
+  - Index-based access via R1 register
+```
 
-### 5.2 Scope Entry (56 bytes)
+**Node Structure (Final):**
+```c
+typedef struct sc_node {
+    addr start;              // 8: allocation address
+    uint32_t length;         // 4: allocation size
+    uint16_t left_idx;       // 2: BST left child index
+    uint16_t right_idx;      // 2: BST right child index
+    uint16_t max_free_log2;  // 2: hint + free flag
+    // [6 bytes compiler padding]
+} sc_node;                   // 24 bytes actual
+```
+
+**Invariants (Enforced by Tests):**
+```
+I1: BST Property       (left < node < right by address)
+I2: Free Marking       (FREE_FLAG in max_free_log2)
+I3: Hint Accuracy      (max free size in subtree)
+I4: Index Validity     (1 ≤ idx < 1024, NODE_NULL = 0)
+I5: Length Consistency (0 < length ≤ 4GB)
+I6: Coalescing         (no adjacent free nodes)
+```
+
+**Operations Implemented:**
+```
+✅ btree_insert    - O(log n) BST insertion
+✅ btree_search    - O(log n) with hint pruning
+✅ btree_mark_free - Set FREE_FLAG + update hints
+✅ btree_delete    - BST deletion (3 cases)
+✅ btree_coalesce  - Merge adjacent free nodes
+⬜ btree_validate  - Walk tree, verify all invariants (stubbed)
+```
+
+**Test Phases Completed:**
+```
+Phase 1: Insert + Search (foundation)
+  - Single node insertion
+  - BST property maintenance
+  - Degenerate trees (all-left, all-right)
+  - First-fit search
+  
+Phase 2: Free + Coalesce (memory reclamation)
+  - FREE_FLAG marking
+  - Adjacent node merging (left, right, triple)
+  - BST deletion (leaf, one-child, two-child)
+  
+Phase 3: Hints (optimization)
+  - Hint accuracy validation
+  - Search space pruning
+  - Hint propagation after coalesce
+```
+
+### What's Next (The Roadmap)
+
+**Phase 4: Invariant Walker (Validation)**
+```
+Goal: Automated tree validation
+  - Walk entire tree
+  - Verify I1-I6 at every node
+  - Detect corruption early
+  - Performance: O(n) full tree scan
+  
+Test plan: ~3-5 tests
+  - test_validate_detects_bst_violation
+  - test_validate_detects_hint_mismatch
+  - test_validate_after_every_operation
+```
+
+**Phase 5: Stress Testing**
+```
+Goal: Break it before production
+  - Random allocation patterns (1000+ ops)
+  - Pool exhaustion and recovery
+  - Degenerate workloads (all small, all large)
+  - Valgrind clean (zero leaks, zero invalid access)
+  
+Test plan: ~5-8 tests
+  - test_random_alloc_free_pattern
+  - test_pool_exhaustion_handling
+  - test_edge_case_sizes (1 byte, 4GB)
+```
+
+**Phase 6: Integration (Wire to SLB0)**
+```
+Goal: Replace dummy allocator with B-Tree backend
+  - scope_alloc() → btree_insert()
+  - scope_dispose() → btree_mark_free() + coalesce
+  - Page management integration
+  - Multi-slab B-Trees (NodeTable[0-14])
+  
+Integration tests: ~10 tests
+  - test_slb0_alloc_uses_btree
+  - test_dispose_triggers_coalesce
+  - test_page_release_on_full_coalesce
+```
+
+**Phase 7: Production Hardening (Red-Black Balancing + Growth) [v0.1.0 TARGET]**
+```
+Goal: Make B-Tree production-ready with guaranteed O(log n) performance
+  
+1. RED-BLACK TREE BALANCING
+   Why: Sequential allocations create O(n) degenerate chains
+   Solution: Self-balancing via red-black rotations
+   Benefits:
+     - Guaranteed O(log n) insert/search/delete
+     - Max height = 2×log₂(n) ≤ 24 for 4096 nodes
+     - Leverages NodeStack for parent tracking (no parent pointers!)
+   
+   Node structure stays 24 bytes:
+     - Steal 1 bit from max_free_log2 for RED/BLACK color
+     - Use NodeStack to track descent path (instead of parent pointers)
+     - Rotations pop parents from stack, rebalance, update
+
+2. NODEPOOL DYNAMIC GROWTH
+   Why: Fixed 1024 nodes limits tree size
+   Solution: mremap() to grow NodePool when exhausted
+   Growth strategy:
+     - Start: 24KB (1024 nodes)
+     - Grow: 48KB → 96KB → 192KB (powers of 2)
+     - Update R1 register after remap
+     - Existing node indices remain valid
+
+3. SLB0 DYNAMIC PAGE GROWTH  
+   Why: Fixed 16 pages limits total allocations
+   Solution: mmap() new page chains when pages fill
+   Strategy:
+     - Detect when all pages full (bump + free list exhausted)
+     - mmap() new page, link to chain
+     - Update scope->page_count
+     - B-Tree automatically tracks new page's blocks
+
+4. NODESTACK EXPANSION (CRITICAL)
+   Problem: Current 16 slots insufficient for Red-Black trees
+   Math:
+     - Red-Black max height = 2×log₂(n)
+     - 1024 nodes → 20 levels needed
+     - 4096 nodes → 24 levels needed
+     - Current stack: 16 slots ⚠️ NOT ENOUGH
+   Solution: Expand NodeStack to 32 slots (256 bytes)
+     - SYS0_NODE_STACK_SIZE: 128 → 256 bytes
+     - Provides headroom for 65K nodes (2×log₂(65536) = 32)
+     - Requires SYS0 layout shuffle (move stack up, preserve alignment)
+
+Test suite: ~15 tests
+  - test_rb_insert_sequential_stays_balanced
+  - test_rb_rotations_maintain_bst_property  
+  - test_nodepool_grows_when_exhausted
+  - test_slb0_pages_grow_dynamically
+  - test_large_tree_operations (10K+ nodes)
+  - Stress tests with valgrind
+
+Deliverable: v0.1.0 - Production-ready single-slab allocator
+```
+
+**Deferred to v0.2.0+:**
+- Multi-slab (14 B-Trees for size classes 2^0 to 2^13)
+- Arena scopes with frame markers
+- Page release (requires tree cleanup before munmap)
+
+---
+
+## Chapter 7: The Contiguity Crisis (v0.3.0-arch)
+
+### The Assumption That Broke Everything
+
+**Date:** February 9, 2026  
+**Status:** CRITICAL ARCHITECTURAL PIVOT  
+**Context:** Testing dynamic page growth with mremap  
+**Discovery:** Our entire B-Tree architecture assumes contiguous memory
+
+**The Fatal Flaw:**
 
 ```c
+// Current B-Tree implementation uses node indices
+typedef struct sc_node {
+    uint16_t left_idx;   // Index into contiguous array
+    uint16_t right_idx;  // Assumes base + (idx * 24)
+    uint16_t parent_idx;
+    // ...
+} sc_node;
+
+// Works perfectly... until pages grow non-contiguously
+sc_node *node = (sc_node*)(pool_base + (node_idx * sizeof(sc_node)));
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                       BREAKS with non-contiguous pages!
+```
+
+**The Realization:**
+
+When SLB0 grows from 16 pages (128KB) to 32 pages:
+1. ❌ **Can't mremap** - May relocate to new address
+2. ❌ **Can't assume contiguity** - New pages may not be adjacent
+3. ❌ **Can't use single B-Tree** - Indices span non-contiguous regions
+4. ❌ **Can't rely on global NodePool** - Base pointer invalidated by mremap
+
+**Evidence of the Problem:**
+
+```bash
+# This worked fine with static 16-page SLB0:
+$ ctest nodepool
+✅ 8/8 tests passed
+
+# But dynamic growth exposes the flaw:
+$ ctest integration --valgrind
+# Segfault when accessing nodes after page growth
+# Invalid memory access: base + (idx * 24) points into unmapped region
+```
+
+**The Uncomfortable Truth:**
+
+We spent 3 weeks perfecting a B-Tree that **fundamentally cannot scale**.
+
+---
+
+### Phase 7: Two-Tier Architecture
+
+**Date:** February 9, 2026  
+**Decision:** Complete architectural redesign  
+**Timeline:** Incremental implementation (1-2 weeks)  
+**Impact:** Critical path for v0.3.0 release
+
+**The Core Insight:**
+
+If memory isn't contiguous, we need **two levels of indexing**:
+1. **Page Directory** - Find which page contains an address (O(log n))
+2. **Per-Page Trees** - Find block within that page (O(log m))
+
+Where:
+- `n` = number of pages (grows dynamically)
+- `m` = blocks per page (~50-60 for 8KB pages)
+
+**Why This Solves Everything:**
+
+| Problem | Phase 6 (Broken) | Phase 7 (Solution) |
+|---------|------------------|-------------------|
+| **Non-contiguous pages** | Single tree assumes contiguous | Per-page trees isolated |
+| **mremap invalidation** | Global pool base pointer | Per-scope ownership |
+| **Growth scalability** | O(n) to find page, O(log n) tree | O(log n) + O(log m) |
+| **Multi-slab support** | Single global NodePool | Each scope owns NodePool |
+
+**The Two-Tier Design:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Skip List (Page Directory)                            │
+│  - Address-ordered pages                               │
+│  - O(log n) search for "which page contains addr?"     │
+│  - 4 levels, probabilistic balancing                   │
+└─────────────────────────────────────────────────────────┘
+                         ↓
+         ┌───────────────┴───────────────┐
+         ↓                               ↓
+┌─────────────────┐            ┌─────────────────┐
+│ Page 1 B-Tree   │            │ Page 16 B-Tree  │
+│ - 50-60 nodes   │    ...     │ - 50-60 nodes   │
+│ - Simple BST    │            │ - Simple BST    │
+│ - No balancing  │            │ - No balancing  │
+└─────────────────┘            └─────────────────┘
+```
+
+**Performance Analysis:**
+
+```
+Old (Phase 6):
+- Single tree: O(log N) where N = total blocks across all pages
+- With 16 pages × 50 blocks = 800 blocks
+- Search depth: log₂(800) ≈ 10 levels
+
+New (Phase 7):
+- Skip list: O(log n) where n = page count (16 → 32 → 64)
+- Per-page tree: O(log m) where m = blocks per page (50-60)
+- Total depth: log₄(n) + log₂(m) = log₄(16) + log₂(50) ≈ 2 + 6 = 8 levels
+
+Benefit: Shallower search, better cache locality, isolated growth
+```
+
+---
+
+### The Data Structures
+
+**1. NodePool Header (24 bytes)**
+
+Per-scope metadata tracking both tier structures:
+
+```c
+typedef struct nodepool_header {
+    usize capacity;           // Total mmap'd size (8KB→24KB→48KB)
+    usize page_count;         // Pages in skip list
+    usize page_alloc_offset;  // Next free page_node slot (grows up)
+    usize btree_alloc_offset; // Next free btree_node slot (grows down)
+    uint16_t skip_list_head;  // First page_node index
+    uint16_t _reserved[7];    // Future use (32-bit alignment)
+} nodepool_header;           // 24 bytes
+
+Layout in mmap region:
+┌──────────────────┬─────────────────────┬─────────────────────┐
+│ Header (24B)     │ page_nodes (↑)      │ btree_nodes (↓)     │
+│ • capacity       │ Skip list grows     │ B-tree nodes grow   │
+│ • page_count     │ from bottom up      │ from top down       │
+└──────────────────┴─────────────────────┴─────────────────────┘
+0                  24                    24KB                  
+                                        (collision → mremap)
+```
+
+**2. Page Node (20 bytes)**
+
+Skip list entry representing one 8KB page:
+
+```c
+typedef struct page_node {
+    addr page_base;         // Base address of 8KB page
+    uint16_t forward[4];    // Skip list forward pointers (4 levels)
+    uint16_t btree_root;    // Root of this page's B-tree
+    uint16_t block_count;   // Blocks allocated in this page
+} page_node;               // 20 bytes
+
+Skip list invariants:
+- Level 0: All pages linked (sequential scan)
+- Level 1-3: Probabilistic express lanes
+- Address-ordered: page_base ascending
+- Search: O(log n) descent to find containing page
+```
+
+**3. Per-Scope Ownership**
+
+Each scope owns its NodePool lifecycle:
+
+```c
+// Updated sc_scope structure (still 64 bytes)
 typedef struct sc_scope {
-    usize scope_id;         //  8: Index in scope_table
-    sbyte slab_id;          //  1: Slab index (-1 for SYS0, 0-14 for SLB0-SLB14)
-    sbyte policy;           //  1: SCOPE_POLICY_*
-    sbyte flags;            //  1: SCOPE_FLAG_* bitmask
-    sbyte _pad[5];          //  5: Alignment
-    addr frame_bump;        //  8: Saved bump pointer for frame rollback
-    char name[16];          // 16: Inline name
-    object (*alloc_fn)(usize size);   //  8: Allocation strategy
-    void (*dispose_fn)(object ptr);   //  8: Disposal strategy
-} sc_scope;                 // Total: 56 bytes
+    uint scope_id;
+    sbyte policy;
+    sbyte flags;
+    sbyte _pad[2];
+    uint first_page_off;
+    uint current_page_off;
+    uint page_count;
+    uint _pad2;
+    char name[16];
+    addr reserved[1];        // BEFORE (unused)
+    addr nodepool_base;      // AFTER (points to mmap region)
+} sc_scope;
+
+Lifecycle:
+1. Scope created → allocate 8KB NodePool (mmap)
+2. SLB0 pages allocated → populate skip list with page_nodes
+3. Allocations happen → per-page B-trees grow
+4. NodePool exhausted → mremap(24KB), update nodepool_base
+5. Scope destroyed → munmap(nodepool_base)
 ```
 
-**Scope Table Layout:**
-| Index | Scope | slab_id | Policy | Flags |
-|-------|-------|---------|--------|-------|
-| 0 | SYS0 | -1 | RECLAIMING | PROTECTED \| PINNED |
-| 1 | SLB0 | 0 | RECLAIMING | SECURE |
-| 2-15 | User slabs | 1-14 | User-defined | User-defined |
-
-**Note:** `slab_id` maps scope to slab. SYS0 has no slab (-1), SLB0-SLB14 map to slabs 0-14.
-
-### 5.3 Slab Descriptor (24 bytes)
+**Growth Strategy:**
 
 ```c
-typedef struct sc_slab {
-    mem_page head;          // 8: First page address
-    usize page_count;       // 8: Number of pages in chain
-    usize total_allocated;  // 8: Bytes allocated across all pages
-} sc_slab;                  // 24 bytes total
+// NodePool doubles when exhausted
+Initial:  8KB  mmap (  0 page_nodes,   0 btree_nodes)
+Growth1: 24KB mremap (120 page_nodes, 800 btree_nodes)  
+Growth2: 48KB mremap (240 page_nodes, 1600 btree_nodes)
+Growth3: 96KB mremap (480 page_nodes, 3200 btree_nodes)
 
-typedef byte *mem_page;     // Pointer to mmap'd 4KB page
+Formula:
+  page_nodes:  (size - 24) / (20 + 24) × (20/24) ≈ size/44 × 0.83
+  btree_nodes: (size - 24) / (20 + 24) × (24/44) ≈ size/44 × 1.00
+
+Key insight: Growth happens in NodePool metadata region,
+             NOT in SLB0 pages. Pages stay stable, trees grow.
 ```
 
-**Purpose:**
-- Tracks page chain for each slab
-- `head` points to first 4KB page
-- For RECLAIMING slabs: pages tracked by B-Tree nodes
-- For BUMP slabs: pages managed by simple bump pointer
+---
 
-**Slab Table Layout (offset 960):**
-| Index | Slab | Scope | Page Chain |
-|-------|------|-------|------------|
-| 0 | SLB0 | scope_table[1] | head → page0 → page1 → ... |
-| 1 | SLB1 | scope_table[2] | head → ... |
-| ... | | | |
-| 14 | SLB14 | scope_table[15] | head → ... |
+### Why Skip List Over B-Tree?
 
-### 5.4 NodeTable (30 bytes in SYS0-RES)
+**The Temptation:**
+
+"We already have B-Tree code. Why add skip list?"
+
+**The Reality:**
+
+| Feature | B-Tree (Pages) | Skip List (Pages) |
+|---------|----------------|-------------------|
+| **Search** | O(log n) | O(log n) |
+| **Insert** | O(log n) + rebalancing | O(log n) probabilistic |
+| **Balancing** | Required (rotations) | Self-balancing (coin flip) |
+| **Code complexity** | 500+ lines | 150-200 lines |
+| **Per-page trees** | Need separate code | Can reuse for blocks |
+| **Memory locality** | Poor (pointer chasing) | Better (forward arrays) |
+
+**Decision Rationale:**
+
+1. **Simplicity**: Skip list insert = find position + coin flip (no rotation logic)
+2. **Code reuse**: Can't use B-Tree for pages (would be recursive)
+3. **Small scale**: With 16-64 pages, skip list performance excellent
+4. **Proven**: Used in Redis, LevelDB, MemSQL for similar use cases
+
+**Implementation Complexity:**
 
 ```c
-// At SYS0 offset 1320
-typedef uint16_t node_idx;
+// Skip list insert (pseudocode)
+void skiplist_insert(page_node *node) {
+    // 1. Find insert position (O(log n) descent)
+    page_node *update[4];
+    find_insert_position(node->page_base, update);
+    
+    // 2. Coin flip for levels (probabilistic)
+    int level = random_level();  // 50% L0, 25% L1, 12.5% L2, 6.25% L3
+    
+    // 3. Link node at each level
+    for (int i = 0; i <= level; i++) {
+        node->forward[i] = update[i]->forward[i];
+        update[i]->forward[i] = node_index(node);
+    }
+}
 
-node_idx NodeTable[15];  // BST root index per slab
+// Total: ~40 lines vs 200+ for Red-Black insert
 ```
 
-**Mapping:**
-- `NodeTable[slab_id]` → root node index for that slab's B-Tree
-- Value `NODE_NULL (0xFFFF)` = no tree (BUMP policy or empty slab)
-- Value `0-1023` = valid root node index
+---
 
-### 5.5 B-Tree Node (16 bytes in NodePool)
+### Why Simple BST for Per-Page Trees?
+
+**The Math:**
+
+```
+Per-page tree size:
+  - Page size: 8KB = 8192 bytes
+  - Min allocation: 16 bytes (alignment)
+  - Max blocks per page: 8192 / 16 = 512 blocks
+  - Typical: ~50-60 blocks (mix of sizes)
+
+Tree depth without balancing:
+  - Best case: log₂(60) ≈ 6 levels
+  - Average case: ~8 levels (random insert)
+  - Worst case: 60 levels (sequential insert)
+
+With balancing (Red-Black):
+  - Guaranteed: 2×log₂(60) ≈ 12 levels max
+
+Cost of balancing:
+  - Code: ~300 lines (rotations, color flips, invariants)
+  - CPU: 2-3x slower insert/delete (rotation overhead)
+  - NodeStack: 32 slots needed (vs 16 for simple BST)
+```
+
+**The Decision:**
+
+For trees with only 50-60 nodes:
+- ✅ **Simple BST acceptable** - Even worst case (60 levels) unlikely
+- ✅ **Periodic rebuild option** - If tree gets pathological, rebuild in O(n)
+- ✅ **Code simplicity** - 100 lines vs 400+ for Red-Black
+- ✅ **Stack size** - 16 slots sufficient (log₂(65K) = 16 max)
+
+**Rebuild Strategy (if needed):**
 
 ```c
-typedef struct sc_node {
-    addr start;             // 8: allocation start address
-    uint32_t length;        // 4: allocation size
-    node_idx left_idx;      // 2: left child index
-    node_idx right_idx;     // 2: right child index
-} sc_node;                  // 16 bytes total
+// Once per 1000 operations, check tree health
+if (operation_count % 1000 == 0 && tree_depth > 2 × log₂(node_count)) {
+    // Tree is pathological, rebuild
+    sc_node *nodes[MAX_NODES];
+    int count = tree_flatten(tree_root, nodes);  // In-order traversal
+    tree_root = tree_build_balanced(nodes, count);  // O(n) rebuild
+}
 
-#define NODE_NULL 0xFFFF    // Null sentinel
-#define NODE_SIZE 16        // sizeof(sc_node)
+// Cost: O(n) rebuild vs O(log n) per-operation balancing
+// For n=60: Rebuild 60 nodes every 1000 ops = 0.06 ops overhead
 ```
 
-**Properties:**
-- Lives in **NodePool** (separate from SYS0 and user pages)
-- Keyed on `start` address for BST ordering
-- Index-based children (not pointers)
-- Explicitly stores allocation `length`
+---
 
-**Comparison with old designs:**
-| Design | Metadata Location | Size Overhead | Page Utilization |
-|--------|-------------------|---------------|------------------|
-| Bitmap (v0.2.0) | Page sentinel + bitmap | 112 bytes/page | ~97% |
-| Headers (inline) | Per-allocation headers | 8-16 bytes/alloc | Variable |
-| B-Tree (v2.0) | External NodePool | 0 bytes/page | **100%** |
-  addr R6;        // Reserved for future system use
-  addr R7;        // Current scope pointer (cache)
+### Implementation Plan
+
+**Phase 7 Deliverables (8 incremental steps):**
+
+```
+1. ✅ DOCUMENTATION (this chapter)
+   - Capture design rationale
+   - Data structure specifications
+   - Performance analysis
+
+2. UPDATE SC_SCOPE STRUCTURE
+   File: include/internal/memory.h
+   Change: reserved[1] → nodepool_base (addr)
+   Impact: SYS0 initialization, scope creation
+
+3. DEFINE NEW STRUCTURES
+   Files: include/internal/memory.h, include/internal/btree.h
+   Additions:
+     - nodepool_header (24 bytes)
+     - page_node (20 bytes)
+     - Skip list level constants
+
+4. AUDIT TEST FILES
+   Files: test/test_*.c (8 files)
+   Impact matrix:
+     - Minimal: test_bootstrap.c, test_stack.c
+     - Moderate: test_integration.c, test_btree_benchmark.c
+     - Major: test_nodepool.c, test_btree_*.c
+
+5. IMPLEMENT NODEPOOL_INIT
+   File: src/node_pool.c
+   Function: nodepool_init(scope) → allocates mmap region
+   Integration: Called after SLB0 page allocation
+   Testing: Verify header, empty skip list, boundary calculation
+
+6. IMPLEMENT SKIP LIST OPERATIONS
+   File: src/node_pool.c (or new src/skip_list.c)
+   Functions:
+     - skiplist_insert(page_base, page_node_idx)
+     - skiplist_find_for_size(size, page_node_idx*)
+     - skiplist_find_containing(addr, page_node_idx*)
+   Testing: Insert 16 pages, search, verify ordering
+
+7. REFACTOR PER-PAGE B-TREE
+   File: src/btree.c
+   Changes:
+     - All functions take (scope, page_node_idx, ...)
+     - Node indices local to page (no global pool)
+     - Remove balancing code (simple BST)
+   Testing: Single-page operations, then multi-page
+
+8. UPDATE SLB0 INITIALIZATION
+   File: src/memory.c (memory_constructor, lines 720-800)
+   Changes:
+     - Allocate NodePool before page setup
+     - Populate skip list with 16 initial pages
+     - Initialize per-page B-tree roots
+   Testing: Bootstrap validation, full integration tests
+```
+
+**Testing Strategy:**
+
+```bash
+# Phase 1-3: Structure validation
+$ ctest bootstrap  # Ensure sc_scope size still 64 bytes
+
+# Phase 4-5: NodePool isolation
+$ ctest nodepool   # Rewrite for per-scope API
+
+# Phase 6: Skip list validation
+$ ctest nodepool   # Add skip list tests
+
+# Phase 7: Per-page tree validation
+$ ctest btree_ops          # Rewrite for per-page trees
+$ ctest btree_validation   # Update invariant checks
+
+# Phase 8: Full integration
+$ ctest integration     # End-to-end allocation/free
+$ ctest btree_stress    # 10K ops with valgrind
+$ ctest --valgrind      # All tests, check for leaks
+```
+
+**Rollback Plan:**
+
+Each phase is atomic:
+- Git commit after each phase passes tests
+- If phase fails validation, revert and regroup
+- No merging to main until all 8 phases complete
+
+**Estimated Timeline:**
+
+```
+Phase 1-2: 0.5 days (documentation, sc_scope update)
+Phase 3-4: 0.5 days (structure definitions, test audit)
+Phase 5:   1 day    (nodepool_init implementation)
+Phase 6:   2 days   (skip list operations + tests)
+Phase 7:   2 days   (per-page B-tree refactor + tests)
+Phase 8:   1 day    (SLB0 initialization + integration)
+Fixes:     1 day    (buffer for unexpected issues)
+         -------
+Total:     8 days (1-2 weeks with reviews)
+```
+
+---
+
+### Why This Is Not Over-Engineering
+
+**The "Ship It" Argument:**
+
+"We have a working B-Tree (Phase 6). Why rewrite for dynamic growth?"
+
+**The Counter-Argument:**
+
+1. **Phase 6 fundamentally broken** for non-contiguous memory
+   - Works now: 16 static pages (lucky)
+   - Breaks immediately: First mremap operation
+   - Not fixable: Architecture assumes contiguity
+
+2. **v0.3.0 requires dynamic growth**
+   - Multi-slab needs per-scope NodePools
+   - Frame markers need arena growth
+   - Production workloads need elasticity
+
+3. **Complexity is not gratuitous**
+   - Skip list: Simpler than B-Tree for pages
+   - Per-page trees: Shallow (no balancing needed)
+   - Two-tier: Required for non-contiguous memory
+
+**The "Why Not Fix It Later?" Trap:**
+
+Delaying this change means:
+- Shipping known-broken architecture
+- Users hit segfaults in production
+- Emergency hotfix under pressure
+- Technical debt compounds
+
+**Better:** Fix now, during development, with time to test.
+
+---
+
+### Reflections: The Third Major Pivot
+
+**Pivot Timeline:**
+
+1. **Phase 1-2 (Jan 18-25)**: Embedded metadata → External metadata
+   - Reason: Disposal paradox, 0% waste goal
+   - Impact: Complete redesign of allocation strategy
+
+2. **Phase 3-5 (Jan 25-Feb 5)**: Linear search → B-Tree
+   - Reason: O(n) →O(log n) performance requirement
+   - Impact: NodePool, node structures, all algorithms
+
+3. **Phase 7 (Feb 9)**: Single tree → Two-tier architecture
+   - Reason: Contiguity assumption breaks with growth
+   - Impact: Another complete redesign
+
+**Pattern Recognition:**
+
+Each pivot shares a common theme:
+- **Assumption exposed**: Something we took for granted breaks
+- **Industry practices questioned**: "Everyone does it this way"
+- **Willingness to rewrite**: Not attached to code, attached to correctness
+
+**The Learning:**
+
+> "If you're not regularly throwing away code, you're not learning fast enough."
+
+We've now rewritten core allocation logic **three times** in three weeks. Each time:
+- Tests had to be rewritten
+- Documentation updated
+- Design documents revised
+
+**This is not waste. This is learning.**
+
+---
+
+### Status: Phase 7 In Progress
+
+**Current State:** February 9, 2026  
+**Implementation:** Step 1/8 complete (documentation)  
+**Next Action:** Update sc_scope structure  
+**Expected Completion:** February 17-21, 2026  
+**Target Release:** v0.3.0-arch (dynamic growth enabled)
+
+**What Phase 7 Enables:**
+
+- ✅ Dynamic page growth without segfaults
+- ✅ Per-scope NodePool ownership
+- ✅ Multi-slab architecture (v0.4.0)
+- ✅ Arena scopes with frames (v0.5.0)
+- ✅ Production-grade memory elasticity
+
+**What We're Willing to Give Up:**
+
+- ❌ "Ship it now" mentality
+- ❌ "Good enough" compromises
+- ❌ Attachment to Phase 6 code (even though it "worked")
+
+**What We Refuse to Compromise:**
+
+- ✅ Correctness over convenience
+- ✅ Clarity over code preservation
+- ✅ Learning over deadlines
+
+---
+
+## Epilogue: Why This Matters
+
+### Beyond "Good Enough to Ship"
+
+**The Industry Standard:**
+```c
+// What most allocators do:
+void* malloc(size_t size) {
+    // Grab first free block that fits
+    // Embed metadata in page
+    // Ship it
 }
 ```
 
-**Purpose:**
-- **R7**: Cache for the currently active scope pointer. When `Scope.set_current(s)` is called, R7 is updated. This avoids repeated lookups from a registry.
-- **R0**: SYS0 base address for offset resolution.
-- **R1-R6**: Reserved for future system usage (e.g., thread-local contexts, ISR state).
+**Why This Exists Everywhere:**
+- Works "well enough" for most use cases
+- Proven in production (decades deployed)
+- Simple to understand and implement
+- Low risk ("nobody ever got fired for choosing malloc")
 
-**Invariants:**
-- All registers are `addr` (= `uintptr_t`); they store address values, not C pointers
-- R7 = 0 or NULL means no active scope
-- Register access is O(1); base at offset 0 + register offset
+**The Cost of "Good Enough":**
+- 10-25% memory overhead (metadata in pages)
+- Cache pollution (data + metadata interleaved)
+- Fragmentation accumulates over time
+- Can't reclaim pages efficiently (metadata blocks release)
 
-### 5.2 Page Sentinel (Metadata)
+**Innovation Requires Stupidity:**
 
-**Location**: First 32 bytes of each 4K SLB page  
-**Field Layout (32 bytes, kAlign-aligned):**
+The smartest thing we did was be dumb enough to ask:
+> "What if we're doing it wrong?"
 
-```c
-struct sc_page_sentinel {
-    addr next_page_off;     // Offset to next page in chain (0 = last page)
-    addr bump_offset;       // Current bump pointer within this page (grows from sentinel end)
-    usize scope_id;         // Owning scope ID (for cross-page navigation)
-    sbyte flags;            // Page-level flags (reserved for future)
-    sbyte page_index;       // Position in scope's page chain (0 = first)
-    sbyte _pad[6];          // Alignment to 32 bytes
-    addr reserved[2];       // Reserved for future metadata
-}
+Every pivot in this document came from **refusing to accept** that "this is how it's done."
+
+- **Headers?** Everyone uses them. But why? (Disposal paradox)
+- **4KB SYS0?** Industry standard. But why? (Cramped, fighting for space)
+- **Embedded metadata?** Obvious choice. But why? (0% utilization waste)
+- **16-byte nodes?** Compact! But why ignore padding? (Accept reality)
+
+### The Dangerous Part
+
+**This took TIME:**
+- 3 weeks from v0.1.0 to v0.2.0
+- Multiple rewrites of core structures
+- Tests rewritten 3+ times
+- Late nights questioning everything
+
+**Most organizations would kill this.**
+
+Why?
+- "We have a working allocator" (v0.1.0 passed tests)
+- "Good enough to ship" (works for demo)
+- "Don't over-engineer" (external metadata is "complex")
+- "Deadline is next week" (ship what we have)
+
+**The bean counter says:**
+```
+Cost: 3 weeks engineering time
+Benefit: "Slightly better" memory allocator
+ROI: Negative
+Decision: Ship v0.1.0
 ```
 
-**Invariants:**
-- Sentinel is always at page offset 0
-- bump_offset starts at 32 (end of sentinel) and grows upward
-- bump_offset never exceeds kPageSize (4096)
-- next_page_off points to sentinel of next page in chain, or 0 if this is last
+**The bean counter is wrong.**
 
-### 5.3 Frame Marker (Checkpoint)
+The benefit isn't "slightly better." It's:
+- **100% page utilization** (vs 75-90% typical)
+- **O(log n) operations** (vs O(n) free list search)
+- **Growable without rewrite** (remap NodePool, code unchanged)
+- **OS-level model** (matches jemalloc/tcmalloc architecture)
 
-**Location**: Per-scope frame stack (array in SYS0)  
-**Field Layout (8 bytes):**
+But more importantly:
+- **We learned** how to question assumptions
+- **We proved** that "impossible" often means "uncomfortable"
+- **We built** something that doesn't compromise
 
-```c
-struct sc_frame_marker {
-    addr page_off;          // Offset to page where checkpoint was taken
-    addr bump_offset;       // Bump pointer value at time of begin
-}
-```
+### For Future Readers
 
-**Purpose**: Saves allocation state for nested frame scopes. On `Frame.end()`, bump pointer is restored to saved state, freeing all allocations made within the frame.
+If you're reading this to learn memory allocation:
+- Don't copy our code
+- Copy our **willingness to throw it away**
 
-**Nesting**: Frames are per-scope; frame stack is separate per scope, allowing independent nesting contexts.
+If you're reading this because you're stuck:
+- The problem isn't you
+- The problem is accepting "good enough"
 
-### 5.4 Scope Object (SYS0-allocated)
+If you're reading this from a company saying "ship it":
+- Push back
+- Show them this document
+- Explain that innovation dies when we ship good enough
 
-**Location**: SYS0 (allocated via reclaiming allocator)  
-**Field Layout (variable size):**
+### The Living Document Promise
 
-```c
-struct sc_scope {
-    usize scope_id;         // Unique ID; used in page sentinels for reverse lookup
-    sbyte policy;           // SCOPE_POLICY_DYNAMIC or SCOPE_POLICY_FIXED (immutable)
-    sbyte flags;            // SCOPE_FLAG_* bitmask (mutable, except policy enforces immutability)
-    addr first_page_off;    // Offset to first page's sentinel in memory
-    addr current_page_off;  // Offset to current (last active) page
-    usize page_count;       // Number of pages in chain
-    string name;            // Scope name (e.g., "work_arena")
-    scope_alloc_fn alloc;   // Polymorphic allocation function pointer
-    scope_dispose_fn dispose; // Polymorphic disposal function pointer
-    struct sc_frame_marker *frame_array;  // Array of frame markers (TBD allocation)
-    usize frame_top;        // Current frame stack depth
-    usize frame_cap;        // Capacity of frame array
-}
-```
+This document will continue to evolve as we:
+- Complete Phase 4-6
+- Discover new problems (there will be more)
+- Pivot again (if needed)
+- Learn from production use
 
-**Concrete Instances:**
-- **SYS0 Scope**: System allocator, reclaiming strategy, PROTECTED|PINNED flags
-- **Arena Scope**: User-space allocator, bump strategy, DYNAMIC/FIXED policy, variable flags
-- **Frame Scope**: Temporary checkpoint, inherits arena's pages/policy, LIFO nesting
+Every failure will be documented.  
+Every pivot will be explained.  
+Every "we were wrong" will be celebrated.
 
-**Stored In**: SYS0 registry (TBD: global array, linked list, or hash table)
+Because that's where the learning lives.
 
 ---
 
-## 6. Constants & Alignment
-
-### 6.1 Fundamental Constants
-
-```c
-#define SYS0_PAGE_SIZE    4096           // Bootstrap page size (power-of-2)
-#define SLB_PAGE_SIZE     4096           // User-space page size (equal to SYS0 for simplicity)
-#define kAlign            16             // Alignment boundary (16 bytes, kAlign-multiple)
-
-// Verify power-of-two at compile time
-static_assert((SYS0_PAGE_SIZE & (SYS0_PAGE_SIZE - 1)) == 0, "SYS0_PAGE_SIZE must be power-of-2");
-static_assert((SLB_PAGE_SIZE & (SLB_PAGE_SIZE - 1)) == 0, "SLB_PAGE_SIZE must be power-of-2");
-```
-
-### 6.2 SYS0 Layout Constants
-
-```c
-#define REGISTER_COUNT      8            // R0-R7 (virtual registers; R0=SYS0 base, R7=current scope)
-#define REGISTER_SIZE       8            // bytes per register
-#define REGISTER_RESERVED   (REGISTER_COUNT * REGISTER_SIZE)  // 64 bytes
-
-#define STACK_SLOTS         16           // Stack slots
-#define STACK_SIZE          8            // bytes per slot
-#define STACK_RESERVED      (STACK_SLOTS * STACK_SIZE)  // 128 bytes
-
-#define SYS0_RESERVED       256          // Total reserved (power-of-2): 64 + 128 + 64
-
-#define FIRST_BLOCK_OFFSET  256          // First allocatable block header offset
-#define LAST_FOOTER_OFFSET  (SYS0_PAGE_SIZE - sizeof(sc_blk_footer))  // 4088
-```
-
-### 6.3 Alignment Invariants
-
-**Rule 1: All metadata is kAlign-aligned**
-- Block headers at offsets ≡ 0 (mod 16)
-- Page sentinels at offsets ≡ 0 (mod 16)
-- Allocated payloads at offsets ≡ 0 (mod 16)
-
-**Rule 2: Reserved regions are power-of-2 sized**
-- SYS0_RESERVED = 256 (simplifies layout)
-- All block sizes are kAlign multiples
-
-**Rule 3: Memory state validation**
-- Verify SYS0_PAGE_SIZE is power-of-2 (compile-time + runtime)
-- Verify first block header is kAlign-aligned
-- Verify last footer is kAlign-aligned (implicit: if FIRST_BLOCK_OFFSET + payload_size aligns)
-- State flags returned as bitfield: `MEM_STATE_READY | MEM_STATE_ALIGN_SYS0 | MEM_STATE_ALIGN_HEADER | MEM_STATE_ALIGN_FOOTER`
+**Current Status:** v0.2.0-btree (Feb 7, 2026)  
+**Next Update:** Phase 4 complete (Invariant Walker)  
+**Maintained By:** SigmaCore Development Team  
+**License:** MIT (Use freely, learn freely, question everything)
 
 ---
 
-## 7. API Surface (Allocator Interface)
-
-### 7.1 Paradigm: Implicit vs. Explicit Scope
-
-**Top-level `Allocator.*` operations** operate on the **current scope** (cached in R7):
-- No scope parameter required
-- Assume polymorphic dispatch to current scope's `alloc_fn` / `dispose_fn`
-
-**`Allocator.Scope.*` operations** require **explicit scope parameter**:
-- Exception: `Allocator.Scope.current()` (getter, no param)
-- All setters and context-specific ops require scope handle
-
-### 7.2 Top-Level Allocator (Current Scope)
-
-```c
-// Allocate size bytes from the CURRENT active scope (polymorphic)
-object Allocator.alloc(usize size);
-// Returns: pointer to allocated memory (kAlign-aligned), NULL if full (FIXED policy) or SYS0 OOM
-// Side Effect: Routes to current_scope->alloc_fn via R7 caching
-
-// Deallocate a block from the CURRENT scope (polymorphic)
-void Allocator.dispose(object ptr);
-// Returns: void
-// Side Effect: Routes to current_scope->dispose_fn via R7 caching
-```
-
-### 7.3 Scope Management (Explicit Scope Operations)
-
-```c
-// Get the currently active scope from R7 register (getter, no parameters)
-void *Allocator.Scope.current(void);
-// Returns: current scope handle or NULL if no scope active
-
-// Set the currently active scope in R7 register (requires scope parameter)
-bool Allocator.Scope.set(void *scope_ptr);
-// Parameters: scope_ptr = explicit scope to set as current
-// Returns: true on success, false if scope_ptr has PINNED flag set
-// Side Effect: Updates R7 register with new scope pointer
-
-// Get configuration from explicit scope (requires scope parameter)
-sbyte Allocator.Scope.config(void *scope_ptr, int mask_type);
-// Parameters: 
-//   scope_ptr = explicit scope to query
-//   mask_type = SCOPE_POLICY or SCOPE_FLAG
-// Returns: policy/flag value (0 on invalid)
-
-// Allocate from explicit scope (requires scope parameter)
-object Allocator.Scope.alloc(void *scope_ptr, usize size);
-// Parameters: scope_ptr = explicit scope, size = bytes to allocate
-// Returns: pointer to allocated memory, NULL if full or SYS0 OOM
-
-// Deallocate to explicit scope (requires scope parameter)
-void Allocator.Scope.dispose(void *scope_ptr, object ptr);
-// Parameters: scope_ptr = explicit scope, ptr = pointer to free
-// Returns: void
-```
-
-### 7.4 Scope Lifecycle (Phase 2+, NOT YET IMPLEMENTED)
-
-```c
-// Create a new scope with given name, initial size, and policy
-scope Allocator.Scope.create(string name, usize initial_size, sbyte policy);
-// PLANNED (Phase 2): Returns opaque scope handle (allocated in SYS0)
-// Errors: NULL if SYS0 exhausted or parameters invalid
-
-// Destroy a scope and free all associated pages/frames
-integer Allocator.Scope.destroy(scope s);
-// PLANNED (Phase 2): Returns OK (0) on success, ERR (-1) if PROTECTED flag set
-
-// Reset scope to empty state (free all user allocations, keep metadata)
-integer Allocator.Scope.reset(scope s);
-// PLANNED (Phase 2): Returns OK on success, ERR if PROTECTED flag set
-
-// Set flags on a scope (if policy allows)
-integer Allocator.Scope.set_flags(scope s, sbyte flags);
-// PLANNED (Phase 2): Returns OK on success, ERR if policy is FIXED (flags immutable)
-
-// Get flags from a scope
-sbyte Allocator.Scope.get_flags(scope s);
-// PLANNED (Phase 2): Returns bitfield of SCOPE_FLAG_* flags
-```
-
-### 7.5 Cross-Scope Operations (Phase 4+, NOT YET IMPLEMENTED)
-
-```c
-// Move data from one scope to another (requires source and destination not SECURE)
-integer Allocator.Scope.move_to(scope dst, object src_ptr, scope src);
-// PLANNED (Phase 4): Returns OK and ptr written, ERR if SECURE flag blocks transfer
-
-// Copy data from one scope to another
-integer Allocator.Scope.copy_to(scope dst, object src_ptr, usize size, scope src);
-// PLANNED (Phase 4): Returns pointer to copied data in dst, NULL if dst SECURE or insufficient space
-```
-
----
-
-## 8. Arena API (Concrete Scope with Frame Nesting)
-
-### 8.1 Arena Lifecycle
-
-```c
-// Create a new arena with given policy and flags
-arena Arena.create(sbyte policy, sbyte flags);
-// Parameters:
-//   policy = SCOPE_POLICY_DYNAMIC or SCOPE_POLICY_FIXED (immutable)
-//   flags = combination of SCOPE_FLAG_* (mutable post-creation, unless policy=FIXED)
-// Returns: arena handle (opaque), NULL if SYS0 exhausted
-// Implementation Phase 2+
-
-// Destroy an arena and free all associated pages
-integer Arena.destroy(arena a);
-// Returns: OK (0) on success, ERR (-1) if PROTECTED flag set
-// Implementation Phase 2+
-
-// Reset arena to empty state (frees allocations, keeps metadata)
-integer Arena.reset(arena a);
-// Returns: OK on success, ERR if PROTECTED flag set
-// Implementation Phase 2+
-```
-
-### 8.2 Arena Frame Operations
-
-```c
-// Begin a new frame checkpoint in the arena
-frame Arena.begin_frame(arena a);
-// Parameters: a = arena to checkpoint
-// Returns: frame handle (opaque), NULL if arena has PINNED flag set
-// Implementation Phase 3+
-
-// End the current frame (restore arena state to checkpoint)
-integer Arena.end_frame(frame f);
-// Parameters: f = frame to end (most recent for its arena)
-// Returns: OK on success, ERR if frame's arena has PINNED flag set or frame not top of stack
-// Implementation Phase 3+
-
-// Get the owning arena of a frame
-arena Arena.get_frame_arena(frame f);
-// Parameters: f = frame to query
-// Returns: arena handle that owns this frame
-// Implementation Phase 3+
-```
-
-### 8.3 Arena Flag Management
-
-```c
-// Set flags on an arena (if policy allows)
-integer Arena.set_flags(arena a, sbyte flags);
-// Parameters: a = arena, flags = new flag values
-// Returns: OK on success, ERR if policy is FIXED (flags immutable)
-// Implementation Phase 2+
-
-// Get flags from an arena
-sbyte Arena.get_flags(arena a);
-// Parameters: a = arena
-// Returns: bitfield of SCOPE_FLAG_* flags
-// Implementation Phase 2+
-```
-
-### 8.4 Frame Nesting Semantics
-
-**Rule 1: Frames are arena-specific**
-- Each frame is tied to one arena
-- Frames from different arenas cannot be mixed
-
-**Rule 2: LIFO (Last-In-First-Out)**
-- `Arena.end_frame(f)` must match most recent `Arena.begin_frame()` in same arena
-- Ending frames out-of-order returns ERR
-
-**Rule 3: Bulk Deallocation**
-- On `Arena.end_frame(f)`, all allocations since corresponding `Arena.begin_frame()` are freed
-- Bump pointer restored to saved checkpoint
-- Implementation: restore bump_offset to saved value; no per-allocation metadata needed
-
-**Rule 4: Nested Frames**
-- Frames can nest arbitrarily deep within an arena
-- Inner frame end restores to inner checkpoint
-- Outer frame end restores to outer checkpoint
-- All allocations in inner frame freed when inner frame ends
-
-**Example (Phase 3+):**
-```c
-arena work = Arena.create(SCOPE_POLICY_DYNAMIC, SCOPE_FLAG_SECURE);
-Allocator.Scope.set(work);
-
-frame f1 = Arena.begin_frame();         // Checkpoint 1: page 0, bump 32
-  object buf1 = Allocator.alloc(256);   // Allocates from work arena
-  frame f2 = Arena.begin_frame();       // Checkpoint 2: page 0, bump 288
-    object buf2 = Allocator.alloc(128); // Reuses work arena pages
-  Arena.end_frame(f2);                  // Restore to checkpoint 2: bump 288, buf2 freed
-  object buf3 = Allocator.alloc(64);    // New allocation, bump now 352
-Arena.end_frame(f1);                    // Restore to checkpoint 1: bump 32, buf1 and buf3 freed
-```
-
----
-
-## 9. Behavioral Rules & Constraints
-
-### 9.1 Allocation Semantics
-
-**SYS0 Reclaiming:**
-- `Scope.free()` returns block to free list for reuse
-- Fragmentation possible; not suitable for high-frequency alloc/free
-- Designed for system object allocation (scopes, frames, page metadata)
-
-**SLBn Bump:**
-- No individual `free()`; only bulk reset via `Frame.end()` or `Scope.reset()`
-- Deterministic: allocation time O(1), no fragmentation
-- Policy determines growth: DYNAMIC chains pages, FIXED returns NULL when full
-
-### 9.2 Flag Enforcement
-
-| Flag | Operation | Behavior |
-|------|-----------|----------|
-| `PROTECTED` | `Scope.destroy()` or `Scope.reset()` | Returns ERR; scope cannot be destroyed/reset |
-| `PINNED` | `Scope.set_current(s)` | Returns ERR; scope cannot become active |
-| `PINNED` | `Frame.begin()` / `Frame.end()` | Returns ERR; cannot nest frames in this scope |
-| `SECURE` | `Scope.move_to()` or `Scope.copy_to()` | Returns ERR; data cannot leave the scope |
-
-### 9.3 Current Scope Rules
-
-- **Default**: No scope is current at system start; must call `Scope.set_current()` to activate
-- **ISR/Critical**: Set PINNED flag to prevent context switching from within ISR
-- **Explicit Management**: Caller responsible for set_current; no implicit scope stack
-- **Allocation Without Current**: Explicit scope handle required in all `Scope.alloc()` calls (no default)
-
-### 9.4 Page Chaining
-
-**Dynamic Scope (POLICY_DYNAMIC):**
-1. Allocate first page on `Scope.create()`
-2. On `Scope.alloc()` when current page full: allocate new page, chain via `next_page_off`, update `current_page_off`
-3. Continue until SYS0 page metadata space exhausted
-
-**Fixed Scope (POLICY_FIXED):**
-1. On `Scope.create(size)`: calculate pages needed, allocate all upfront, chain them
-2. On `Scope.alloc()`: bump within prealloc'd pages only; return NULL if no space
-
-**Page Linkage**:
-```c
-// From scope metadata:
-page_ptr = memory_base + first_page_off;    // Start of first page
-// In page sentinel:
-next_page = (next_page_off == 0) ? NULL : (memory_base + next_page_off);
-```
-
----
-
-## 10. Implementation Notes
-
-### 10.1 Storage Locations
-
-| Component | Location | Size | Allocated From |
-|-----------|----------|------|-----------------|
-| Virtual Registers (R0-R7) | SYS0 offset 0-63 | 64 bytes | Embedded in SYS0 |
-| Stack (16 slots) | SYS0 offset 64-191 | 128 bytes | Embedded in SYS0 (reserved for future) |
-| `sc_scope` struct | SYS0 registry (TBD) | ~80-120 bytes | SYS0 reclaiming |
-| Frame stack array | SYS0 or embedded | 8 * frame_cap | SYS0 reclaiming |
-| Page metadata (sentinel) | Start of each SLB page | 32 bytes | Embedded in page |
-| **current_scope** (cached) | **SYS0 register R7** | **8 bytes (addr)** | **Cached, not allocated** |
-| **sys0_base** (cached)     | **SYS0 register R0** | **8 bytes (addr)** | **Cached, not allocated** |
-| SYS0 data | SYS0 pages | per-object | SYS0 reclaiming |
-| SLBn user data | SLBn pages | per-alloc | SLBn bump allocation |
-
-### 10.2 Initialization Sequence
-
-1. **Bootstrap** (`init_memory_system()`):
-   - Allocate SYS0 page (4K, sys page)
-   - Verify SYS0_PAGE_SIZE is power-of-2
-   - Initialize virtual registers (R0-R7) at offset 0:
-     - R0 = SYS0 base address
-     - R1-R6 = 0 (reserved for future use)
-     - R7 = 0 (current scope cache starts null)
-   - Initialize first block header at offset 256 (FREE, LAST flags)
-   - Initialize footer at offset 4088 (magic = 0xDEADC0DE)
-   - Mark memory state: MEM_STATE_READY | MEM_STATE_ALIGN_SYS0 | MEM_STATE_ALIGN_HEADER | MEM_STATE_ALIGN_FOOTER
-   - **Phase 1 COMPLETE**: SYS0 initialized and tested
-
-2. **Scope Creation** (`Allocator.Scope.create()` - Phase 2):
-   - Allocate `sc_scope` struct in SYS0
-   - Allocate initial page(s):
-     - DYNAMIC: allocate 1 page
-     - FIXED: pre-calculate pages needed, allocate all
-   - Chain pages via `next_page_off` in sentinels
-   - Initialize frame array (if nesting expected)
-   - Set first_page_off, current_page_off, page_count
-   - Allocate in SYS0 registry (global array/hash, TBD)
-   - **Phase 2**: To be implemented
-
-3. **Scope Activation** (`Allocator.Scope.set()` - Phase 1):
-   - Check s is not PINNED; return false if true
-  - Write scope handle to R7 (via register set)
-   - Future polymorphic allocations default to this scope
-   - **Phase 1 API**: Signature in place; functionality pending Phase 2 Scope.create()
-
-4. **SLB (Slab) Implementation** (Phase 2):
-   - SlabManager: Internal wrapper around PArray for slab registry
-   - Each slab = page with page_sentinel at offset 0, bump allocator for payload
-   - Borrow slot-reuse mechanics from SlotArray: ADDR_EMPTY sentinel, circular search for sparse reuse
-   - Growth: 2x multiplier on PArray when slab registry fills
-   - **Phase 2**: To be implemented with Scope lifecycle
-
-### 10.3 Design for Real-Time Safety
-
-**Deterministic Allocation:**
-- SLBn bump allocation: O(1), no search
-- Boundary checks: O(1)
-- Page chaining: O(1) if current_page cached
-
-**Bulk Deallocation:**
-- Frame-based: O(1) restore (restore bump pointer only)
-- No traversal or coalescing needed
-
-**Predictability:**
-- FIXED policy: pre-allocate all memory, allocation never fails (except SYS0 OOM for metadata)
-- DYNAMIC policy: unbounded, but per-allocation cost constant
-
-**Isolation:**
-- Scope-based: data in one scope cannot corrupt another
-- SECURE flag: prevent cross-scope leaks
-- PROTECTED flag: prevent accidental deallocation
-
----
-
-## 11. Testing Strategy (TDD)
-
-### 11.1 Phase 1: Foundation (COMPLETE ✅)
-- ✅ `test_sys0_initialized`: Header/footer bookends, magic marker
-- ✅ `test_sanity_memory_alignments`: All alignment flags set
-- ✅ `test_init_page_creates_single_free_block`: Block state and size
-- ✅ Allocator interface refactored: `Scope` → `Allocator` (top-level), `Allocator.Scope.*` (explicit scope ops)
-- ✅ Paradigm: No scope param for `Allocator.alloc/dispose`; all `Allocator.Scope.*` ops require scope param
-
-### 11.2 Phase 2: Arena Lifecycle (Next)
-- `test_arena_create_dynamic`: Create arena with DYNAMIC policy, allocate succeeds across page boundaries
-- `test_arena_create_fixed`: Create arena with FIXED policy, allocates prealloc'd pages, fails when full
-- `test_arena_destroy_succeeds`: Destroy non-protected arena
-- `test_arena_destroy_protected_fails`: Destroy fails if PROTECTED flag set
-- `test_arena_reset_clears_allocations`: Reset clears bump pointers across all pages
-- **Implementation Note**: Arena lifecycle (create, destroy, reset); SLB slab implementation (SlabManager, page chaining)
-
-### 11.3 Phase 3: Frame Nesting
-- `test_frame_begin_end`: Save/restore bump offset
-- `test_frame_nesting_two_levels`: Nested frames, LIFO behavior
-- `test_frame_pinned_blocks`: PINNED arena returns ERR on frame_begin
-- `test_frame_deep_nesting`: 10-level nesting, allocations freed correctly on unwind
-
-### 11.4 Phase 4: Flag Enforcement
-- `test_pinned_blocks_set_current`: Pinned scope cannot become current
-- `test_protected_blocks_destroy`: Protected scope cannot be destroyed
-- `test_secure_blocks_copy`: SECURE scope blocks copy_to
-
-### 11.5 Phase 5: Cross-Scope Operations
-- `test_move_to_success`: Move data between scopes
-- `test_move_to_secure_fails`: SECURE scope blocks move_to
-- `test_copy_to_allocates`: Copied data allocated in destination
-
-### 11.6 Phase 6: Invariants Under Stress
-- `test_alignment_maintained_after_alloc`: All state flags still set after allocation
-- `test_page_chain_integrity`: Next pointers valid after page expansion
-- `test_multiple_scopes_independent`: Allocations in different scopes don't interfere
-
----
-
-## 12. Appendix: Layout Diagrams
-
-### A.1 SYS0 Memory Layout
-
-```
-Offset (bytes)    Content                     Usage
-─────────────────────────────────────────────────────
-0                 R0-R6 Registers (addr)      Reserved for future system use
-56                R7 Register (addr)          Current scope pointer (cache)
-64                Stack (128 bytes)           Reserved for future system stack
-                  [16 slots of 8 bytes each]
-192               [Reserved] (64 bytes)       Future SYS0 control data
-─────────────────────────────────────────────────────
-256               Block Header (16 bytes)     First allocatable block
-                  - next_off = 0
-                  - size = 3824
-                  - flags = FREE|LAST
-272               [Payload - Free Space]      Available for SYS0 alloc
-                  ...
-4088              Block Footer (8 bytes)      Last bookend
-                  - magic = 0xDEADC0DE
-                  - size_dup = 3824
-─────────────────────────────────────────────────────
-Total: 4096 bytes
-```
-
-### A.2 SLBn Page Layout (Single Page)
-
-```
-Offset (bytes)    Content                     Usage
-─────────────────────────────────────────────────────
-0                 Page Sentinel (32 bytes)    Metadata
-                  - next_page_off = 0
-                  - bump_offset = 32
-                  - scope_id = <scope_id>
-                  - page_index = 0
-32                [User Payload]              Allocatable via bump
-                  ...
-4096              [End of Page]               Natural boundary
-─────────────────────────────────────────────────────
-Total: 4096 bytes
-```
-
-### A.3 Multi-Page SLBn Scope (Dynamic Growth)
-
-```
-Page 0 (4K)                    Page 1 (4K)
-┌──────────────────────┐       ┌──────────────────────┐
-│ Sentinel             │       │ Sentinel             │
-│ next_off → Pg1       │───────│ next_off = 0         │
-│ bump = 1024          │       │ bump = 256           │
-├──────────────────────┤       ├──────────────────────┤
-│ User Data (992B)     │       │ User Data (224B)     │
-│ [allocated]          │       │ [allocated]          │
-│ [free]               │       │ [free]               │
-└──────────────────────┘       └──────────────────────┘
-Current Scope:
-  first_page_off → Page 0
-  current_page_off → Page 1 (where bump is)
-  page_count = 2
-```
-
----
-
-## 15. Glossary
-
-| Term | Definition |
-|------|-----------|
-| **Scope** | Abstract allocator interface; polymorphic type for generic operations. Concrete: SYS0, Arena, Frame. |
-| **Arena** | Concrete scope type with explicit lifecycle; can have frames nested within. Created via `Arena.create()`. |
-| **Frame** | Temporary scope nested within an arena; checkpoint for bulk deallocation. Created via `Arena.begin_frame()`. |
-| **SLB0** | Default user-space arena; DYNAMIC policy, SECURE flags. Allocated from SYS0 during bootstrap. |
-| **Policy** | Immutable arena property: DYNAMIC (auto-grow) or FIXED (prealloc) |
-| **Flag** | Mutable scope property: PROTECTED, PINNED, or SECURE; controls access |
-| **Bump Pointer** | Monotonically increasing offset within a page; allocation endpoint |
-| **Page Chain** | Linked list of 4K pages; next pointers in sentinels |
-| **Reclaiming** | Allocation strategy with free list; fragmentation possible (SYS0) |
-| **Deterministic** | Allocation time O(1); no fragmentation; predictable latency |
-| **Sentinel** | Metadata header at start of page; immutable during page lifetime |
-
----
-
-## 15. Design Rationale Notes
-
-### Current Scope Caching (R7 vs. Separate Field)
-
-**Why R7 instead of a dedicated field at offset 192-199?**
-
-The current_scope pointer is cached in register R7 rather than a separate reserved field because:
-
-1. **Semantic Correctness**: Registers exist to cache frequently-accessed state. R7 is dedicated to the most-active allocator context while keeping R0-R6 free for future system/runtime use.
-
-2. **Architectural Alignment**: When register/stack management is fully implemented later, R7 will already be correctly integrated; no refactoring needed. Lower registers remain available for ISR/thread metadata.
-
-3. **Solves the Chicken-Egg Problem**: We defer the full register struct implementation (which would require thread/ISR management) but use a minimal version now (8 addr fields) to establish the caching pattern.
-
-4. **Frees Reserved Space**: By using R7, we avoid consuming a separate offset (192-199) and keep the 192-255 region truly reserved for future SYS0 control data.
-
-**Implementation Note**: Registers start at 0; R7 is set to the current scope during bootstrap. When ISR/context management arrives, the remaining registers will gain purpose without architectural disruption.
-
----
-
-## 14. Implementation Status & Concerns
-
-### 14.1 Phase 1: Complete ✅
-
-**What's Implemented:**
-- SYS0 bootstrap allocator (4K reclaiming)
-- Virtual register R7 for current scope caching
-- Block header/footer with splitting and alignment
-- Allocator interface refactor (Scope → Allocator)
-- Paradigm: implicit scope for `Allocator.*`, explicit scope for `Allocator.Scope.*`
-- 9/9 bootstrap tests passing; valgrind clean (0 bytes definitely lost)
-
-**What's NOT Implemented (Phase 1):**
-- Scope lifecycle (create, destroy, reset) — deferred to Phase 2
-- SLB slab allocator — deferred to Phase 2
-- Frame nesting — deferred to Phase 3
-- Flag enforcement (PROTECTED, PINNED, SECURE) — runtime checks needed
-
-### 14.2 Design Decisions & Rationale
-
-#### Allocator Interface Paradigm (Phase 1)
-
-**Decision**: Top-level `Allocator.alloc(size)` operates on current scope (no scope parameter); `Allocator.Scope.*` operations require explicit scope.
-
-**Rationale**:
-- **Simplicity**: Most user code just calls `Allocator.alloc()`; implicit use of current scope (R7) reduces parameter count
-- **Consistency**: Matches `Allocator.Frame.*` (future) where `Frame.begin()` uses current scope implicitly
-- **Clarity**: Nested `.Scope` namespace signals "explicit scope required"
-- **Flexibility**: Power users can still call `Allocator.Scope.alloc(scope_ptr, size)` for explicit control
-
-#### R7 Register for Current Scope Caching
-
-**Decision**: Current scope pointer cached in R7 register (virtual register at offset 56-63) rather than dedicated SYS0 field.
-
-**Rationale**:
-- **Register Semantics**: Registers are designed for frequently-accessed state; dedicating R7 isolates the "current context" while reserving R0-R6 for future system use.
-- **Future-Proof**: When ISR/thread contexts arrive, R7 will already be integrated; no architectural refactor needed
-- **Clean Semantics**: Distinguishes "currently active" (R7) from "stored metadata" (SYS0 fields), enabling future per-thread or per-ISR contexts
-
-#### Scope Parameter Requirement for `config()`
-
-**Decision**: `Allocator.Scope.config(scope, mask_type)` requires explicit scope; no "config of current scope" at top level.
-
-**Rationale**:
-- **Consistency**: All `Allocator.Scope.*` operations except `.current()` require scope param
-- **Predictability**: Prevents accidental query of wrong scope
-- **Future**: Top-level `Allocator.get_config(mask_type)` could be added later as convenience wrapper if needed
-
-### 14.3 Known Limitations & Open Questions
-
-#### Scope Registry (Phase 2)
-
-**Question**: How are scopes (arenas) stored and looked up? Options:
-1. Global static array (fixed max arenas)
-2. Linked list in SYS0 (fragmentation risk)
-3. Hash table in SYS0 (complexity; may require allocation)
-4. Single current scope (R7 only; no registry)
-
-**Current Assumption**: Multiple arenas supported via registry (TBD structure); only current arena cached in R7.
-
-#### Frame Stack Storage (Phase 3)
-
-**Question**: Where does each arena's frame stack live? Options:
-1. Embedded in arena struct (limited frame depth)
-2. Allocated in SYS0 (fragmentation)
-3. Preallocated array in SYS0 during arena creation
-
-**Current Assumption**: Allocated in SYS0 per arena during `Arena.create()`.
-
-#### SLB (Slab) Architecture (Phase 2)
-
-**Question**: Slab = single fixed page or dynamic multi-page container?
-
-**Current Design**:
-- Each slab/page = single 4K page with page_sentinel at offset 0, bump allocator for payload
-- SlabManager (PArray-based) registry manages multiple slabs/pages within an arena
-- Arena can own multiple pages chained via `next_page_off`
-- Growth: When page fills, allocate new page, chain via sentinel, update current_page_off
-- Slot reuse: Borrow ADDR_EMPTY sentinel + circular search from SlotArray (future, Phase 4+)
-
-**Concern**: Performance of multi-page allocation. If app frequently allocates > 4KB, will create many pages and potentially fragment arena. Mitigation: Pre-allocate larger arenas or implement variable-size pages (Phase 4+).
-
-#### Thread/ISR Safety (Phase 4+)
-
-**Current Design**: Single R7 for current scope; no per-thread or per-ISR contexts.
-
-**Concern**: Multi-threaded apps will have race conditions on R7. Solution: Extend R0-R7 registers to thread-local or ISR-stack contexts (Phase 4+).
-
-#### SLB0 Default Arena
-
-**Design**: SLB0 is an Arena instance with:
-- Policy: SCOPE_POLICY_DYNAMIC
-- Flags: SCOPE_FLAG_SECURE (default, can be modified)
-- scope_id: 1 (reserved)
-- Allocated from SYS0 during bootstrap
-
-**Behavior**: After bootstrap, `Allocator.alloc()` operates on SLB0 by default (current scope in R7).
-
-### 14.4 Deferred Implementation
-
-The following are **planned but NOT implemented**:
-
-| Feature | Phase | Status |
-|---------|-------|--------|
-| Arena lifecycle (create/destroy/reset) | 2 | 🔜 Planned |
-| SLB slab/page allocator | 2 | 🔜 Planned |
-| Arena.set_flags / get_flags | 2 | 🔜 Planned |
-| Frame nesting (Arena.begin_frame/end_frame) | 3 | 🔜 Planned |
-| PINNED/PROTECTED/SECURE flag enforcement | 2-4 | 🔜 Planned |
-| Cross-arena move/copy | 4 | 🔜 Planned |
-| Arena registry (TBD structure) | 2 | 🔜 TBD |
-| Variable-size pages/slabs | 4+ | 🔜 Future |
-| Thread-local arena contexts | 4+ | 🔜 Future |
-
----
-
-## 14. Version History
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.2 | 2026-01-22 | Updated API: Scope → Allocator (top-level), Allocator.Scope.* (explicit scope). Added config(scope, mask_type) signature. Documented paradigm, design rationale, known limitations. Phase 1 marked COMPLETE. |
-| 1.1 | 2026-01-20 | Register-based R7 caching for current_scope; moved from offset 192-199 field to R7 register |
-| 1.0 | 2026-01-20 | Initial design document; dual allocator architecture, scope policies/flags, frame nesting, SYS0/SLBn layouts |
+*"Good enough to ship is the enemy of good. We refuse to ship until it's honest."*  
+— SigmaCore Team Philosophy
 

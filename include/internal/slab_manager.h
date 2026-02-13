@@ -31,7 +31,7 @@
 
 typedef struct sc_slab_manager_i {
     bool (*init_slab_array)(void);
-    addr (*get_slab_slot)(usize slot_index);
-    bool (*set_slab_slot)(usize slot_index, addr value);
+    addr (*get_slab_entry)(usize slot_index);
+    bool (*set_slab_entry)(usize slot_index, addr value);
 } sc_slab_manager_i;
 extern const sc_slab_manager_i SlabManager;

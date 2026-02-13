@@ -1,0 +1,8 @@
+[2] Performance: Allocation Scaling :    4 : 2026-02-12  14:30:53               
+================================================================================
+Running: Benchmark: 20 allocations                              57.109 ms [PASS]
+Running: Benchmark: 40 allocations                              63.805 ms [PASS]
+Running: Benchmark: 60 allocations                              73.203 ms [PASS]
+Running: Benchmark: scaling analysis                            18.520 ms [PASS]
+================================================================================
+[2]     TESTS=  4        PASS=  4        FAIL=  0        SKIP=  0

@@ -41,7 +41,7 @@ REQUIRES=("sigma.collections")
 
 # Bundle definitions: associative array mapping bundle names to "output_name | source_list"
 declare -A PACKAGES=(
-    ["memory"]="sigma.memory | memory slab_manager"
+    ["memory"]="sigma.memory | memory node_pool slab_manager"
 )
 
 # Build target definitions: associative array mapping targets to commands
