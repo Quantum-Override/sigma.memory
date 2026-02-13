@@ -1,7 +1,7 @@
 # SigmaCore Memory - Roadmap
 
-**Current Version:** 0.2.0 (B-Tree Architecture)  
-**Last Updated:** February 6, 2026  
+**Current Version:** 0.2.0-alpha (B-Tree Architecture) ✅  
+**Last Updated:** February 12, 2026  
 **Branch:** rel-0.2.0-btree (from v0.1.0 baseline)
 
 ---
@@ -263,30 +263,37 @@ usize diag_slab_alloc_count(sbyte slab_id);
 
 Items for future releases, roughly prioritized:
 
-### High Priority
-| ID | Item | Description |
-|----|------|-------------|
-| F-01 | User Arenas (SLB1-14) | Custom scopes, POLICY_RECLAIMING or BUMP |
-| F-02 | sys0_dispose Coalescing | Implement block merging for SYS0 |
-| F-03 | NodePool Growth | Auto-remap when exhausted (18KB → 36KB → ...) |
-| F-04 | Tree Rebalancing | AVL or RB-tree for pathological cases |
+### High Priority (v0.2.1 Focus)
+| ID | Item | Description | Target |
+|----|------|-------------|--------|
+| F-01 | Frame Support (Prototyping) | Frame ops for dynamic/reclaiming slabs | v0.2.1 |
+| F-02 | Standard Arena/Frame API | User-facing frame create/dispose/introspect | v0.2.1 |
+| F-03 | Thread-Safety Core | Lock strategy, atomic ops, safety analysis | v0.2.1 |
+| F-04 | Concurrency Performance | Multi-threaded benchmarks, contention fixes | v0.2.1 |
 
-### Medium Priority
-| ID | Item | Description |
-|----|------|-------------|
-| F-05 | Frame Checkpoints | Transactional save/restore for nested scopes |
-| F-06 | Scope Introspection | Stats API (page_count, alloc_count, fragmentation) |
-| F-07 | BUMP Policy Slabs | Simple bump allocator for deterministic use cases |
-| F-08 | Allocation Hints | Size classes, burst patterns, best-fit vs first-fit |
+### Medium Priority (v0.3.0+)
+| ID | Item | Description | Target |
+|----|------|-------------|--------|
+| F-05 | User Arenas (SLB1-14) | Custom scopes, POLICY_RECLAIMING or BUMP | v0.3.0 |
+| F-06 | sys0_dispose Coalescing | Implement block merging for SYS0 | v0.3.0 |
+| F-07 | Tree Rebalancing | AVL or RB-tree for pathological cases | v0.3.0+ |
 
-### Low Priority / Ideas
-| ID | Item | Description |
-|----|------|-------------|
-| I-01 | Log2 Size Classes | Bucketing for faster search (2^n bins) |
-| I-02 | Thread-Local Caches | Per-thread NodePool for lock-free allocs |
-| I-03 | Memory Compaction | Defragment by moving allocations (handle-based) |
-| I-04 | Debug Poisoning | Fill freed memory with 0xDEADBEEF |
-| I-05 | Scope Callbacks | Hooks for profiling (compile-guarded) |
+### Low Priority (Future)
+| ID | Item | Description | Target |
+|----|------|-------------|--------|
+| F-08 | Frame Checkpoints (Advanced) | Transactional save/restore for nested scopes | v0.3.0+ |
+| F-09 | Scope Introspection (Full) | Stats API (page_count, alloc_count, fragmentation) | v0.3.0+ |
+| F-10 | BUMP Policy Slabs | Simple bump allocator for deterministic use cases | v0.3.0+ |
+| F-11 | Allocation Hints | Size classes, burst patterns, best-fit vs first-fit | v0.3.0+ |
+
+### Ideas / Exploration
+| ID | Item | Description | Notes |
+|----|------|-------------|-------|
+| I-01 | Log2 Size Classes | Bucketing for faster search (2^n bins) | Post-concurrency |
+| I-02 | Thread-Local Caches | Per-thread NodePool for lock-free allocs | Related to F-03 |
+| I-03 | Memory Compaction | Defragment by moving allocations (handle-based) | Complex, far future |
+| I-04 | Debug Poisoning | Fill freed memory with 0xDEADBEEF | Useful for debugging |
+| I-05 | Scope Callbacks | Hooks for profiling (compile-guarded) | v0.3.0+ |
 
 ---
 
@@ -362,52 +369,125 @@ Intentional architectural choices for the v0.2.0 rewrite:
 
 ---
 
-### v0.2.0 🚧 (In Progress - February 2026)
+### v0.2.0-alpha ✅ (February 12, 2026)
 
 **Branch:** rel-0.2.0-btree  
+**Tag:** v0.2.0-alpha  
 **Theme:** Metadata-External B-Tree Architecture
 
 **Major Changes:**
 - Complete redesign: bitmap → B-Tree external tracking
 - SYS0: 4KB → 8KB (6.6KB DAT)
-- NodePool: 18KB separate mmap (1024 × 18-byte nodes)
+- NodePool: 2KB initial (grows dynamically: 2→4→8→16→32KB)
+- Node size: 24 bytes (cache-aligned, explicit reserved space)
 - Pages: 100% payload (no metadata)
 - Stack-based operations (register machine)
 - Per-slab B-Tree roots
 
+**Critical Bugfix:**
+- Block splitting reuses existing node (prevents pool exhaustion)
+- 40 iterations stable in 2KB pool vs 3.5 iterations before
+
+**Performance:**
+- 64B blocks: ~1.5M ops/sec
+- 1KB blocks: ~3.7M ops/sec
+- Mixed workload: ~5.7M ops/sec
+- 2-3x improvement over pre-bugfix state
+
+**Test Coverage:**
+- 45 tests passing (bootstrap, btree, integration, validation, performance)
+- Valgrind clean (no leaks, no errors)
+
+**Package:**
+- sigma.memory.o published to /usr/local/packages/
+- Ready for SigmaTest integration
+
 **Phases:**
 - [x] Phase 0: Re-branch from v0.1.0, update docs, clean tests
-- [ ] Phase 1: 8KB SYS0, node structure defined
-- [ ] Phase 2: NodePool + Stack infrastructure
-- [ ] Phase 3: B-Tree core operations
-- [ ] Phase 4: Node split/merge ops
-- [ ] Phase 5: SLB0 wired to B-Tree
-- [ ] Phase 6: Diagnostics + validation
-- [ ] Phase 7: Integration + stress testing
+- [x] Phase 1: 8KB SYS0, node structure defined
+- [x] Phase 2: NodePool + Stack infrastructure
+- [x] Phase 3: B-Tree core operations
+- [x] Phase 4: Node split/merge ops
+- [x] Phase 5: SLB0 wired to B-Tree
+- [x] Phase 6: Diagnostics + validation
+- [x] Phase 7: Integration + stress testing
 
-**Target:** Complete, production-ready B-Tree allocator
+**Status:** ✅ COMPLETED (February 12, 2026)
 
 ---
 
-### v0.3.0 (Future)
+### v0.2.1 (Next - Q1 2026)
 
-**Theme:** Multi-Slab & Policies
+**Theme:** Frame Support & Concurrency Foundation
+
+**Focus Areas:**
+1. **Frame Support in Prototyping**
+   - Frame operations for dynamic slabs
+   - Frame support in reclaiming slabs
+   - Checkpoint/restore mechanics
+   - Nested frame validation
+
+2. **Standard Arena/Frame API**
+   - User-facing frame creation API
+   - Frame disposal (rollback allocations)
+   - Frame introspection (allocation count, memory usage)
+   - Integration with existing slab policies
+
+3. **Concurrency & Thread-Safety**
+   - Thread-safety analysis of current implementation
+   - Lock strategy design (per-slab vs global)
+   - Atomic operations for critical sections
+   - Thread-local caching exploration
+
+4. **Performance from Threading**
+   - Benchmark single-threaded baseline
+   - Multi-threaded allocation stress tests
+   - Identify and resolve contention points
+   - Scalability validation (2, 4, 8 threads)
+
+**Deliverables:**
+- Frame API in prototyping mode (basic operations working)
+- Concurrency safety assessment with recommendations
+- Thread-safety implementation for core allocator
+- Performance baseline: single vs multi-threaded
+- Updated benchmarks and stress tests
+
+**Success Criteria:**
+- SigmaTest dogfooding reveals no critical bugs
+- Frame operations validated in real-world scenarios
+- Thread-safe allocations with minimal contention
+- Performance scales reasonably with thread count
+
+---
+
+### v0.3.0 (Future - Q2 2026)
+
+**Theme:** Production Multi-Slab & Advanced Policies
 
 **Planned:**
-- User arenas (SLB1-SLB14)
+- User arenas (SLB1-SLB14) - production ready
 - POLICY_BUMP slabs (deterministic allocation)
 - POLICY_RECLAIMING slabs (B-Tree backed)
-- Scope introspection API
+- Scope introspection API (full stats)
 - sys0_dispose coalescing
+- Advanced frame operations (transactional, nested)
 
 ---
 
-## 🐛 Known Issues (v0.2.0-btree)
+## 🐛 Known Issues
 
+### v0.2.0-alpha (Current)
 | ID | Issue | Status | Notes |
 |----|-------|--------|-------|
-| KI-01 | Bootstrap tests outdated | Open | Need update for 8KB SYS0 (Phase 1) |
-| KI-02 | No allocation limit checking | Open | Can exhaust NodePool; need growth (Phase 3+) |
+| KI-03 | No frame support yet | Tracked | Planned for v0.2.1 |
+| KI-04 | Not thread-safe | Tracked | Planned for v0.2.1 |
+| KI-05 | Single-threaded only | Tracked | Concurrent access will corrupt state |
+
+### v0.2.0-alpha (Resolved)
+| ID | Issue | Status | Resolution |
+|----|-------|--------|------------|
+| KI-01 | Bootstrap tests outdated | ✅ Fixed | Updated for 8KB SYS0 |
+| KI-02 | Node pool exhaustion | ✅ Fixed | Dynamic growth (2→32KB), split reuses nodes |
 
 ---
 
@@ -441,6 +521,7 @@ After each phase:
 
 ---
 
-**Last Updated:** February 6, 2026  
-**Next Milestone:** Phase 1 - 8KB SYS0 Bootstrap
+**Last Updated:** February 12, 2026  
+**Current Milestone:** v0.2.0-alpha RELEASED ✅  
+**Next Milestone:** v0.2.1 - Frame Support & Concurrency
 
