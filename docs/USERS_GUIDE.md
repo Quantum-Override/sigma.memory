@@ -35,7 +35,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/sigmacore/sigma.memory.git
+git clone https://github.com/Quantum-Override/sigma.memory.git
 cd sigma.memory
 
 # Build shared library
