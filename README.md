@@ -19,7 +19,7 @@ A high-performance C memory allocator with B-tree external metadata architecture
 **Sigma.Memory** is not:
 - ❌ A general-purpose malloc() wrapper (use system malloc for that)
 - ❌ A garbage collector (manual dispose required)
-- ❌ Thread-safe yet (v0.2.1 will add concurrency support)
+- ❌ Thread-safe yet (v0.2.1 designs thread-friendly hooks for Sigma.Tasking)
 - ❌ A debugging allocator (no guard pages, poisoning - yet)
 
 ## Why Use It?
@@ -106,15 +106,6 @@ gcc myapp.c /usr/local/packages/sigma.memory.o -I/usr/local/include/sigma.memory
 gcc myapp.c sigma.memory/build/*.o -Isigma.memory/include -o myapp
 ```
 
-### Running Tests
-
-```bash
-cbuild          # Compile library + tests
-ctest memory    # Run memory tests
-ctest btree_ops # Run btree operation tests
-ctest --valgrind integration  # Run with memory leak detection
-```
-
 ## Documentation
 
 | Document | Description |
@@ -152,8 +143,8 @@ ctest --valgrind integration  # Run with memory leak detection
 |---------|--------|----------|
 | **0.1.0** | ✅ Released | SYS0 bootstrap, SLB0 allocator, 30 tests |
 | **0.2.0-alpha** | ✅ Released | B-tree metadata, dynamic growth, 45 tests, critical bugfixes |
-| 0.2.1 | 🚧 Planned | Frame support, thread-safety, concurrency |
-| 0.3.0 | 📋 Future | User arenas (SLB1-14), POLICY_BUMP/RECLAIMING |
+| 0.2.1 | 🚧 Planned | Frame/arena support, thread-friendly design |
+| 0.3.0 | 📋 Future | User arenas (SLB1-14), thread-safety with Sigma.Tasking |
 | 1.0.0 | 📋 Future | Production hardening, API stability, full frame checkpoints |
 
 ## License

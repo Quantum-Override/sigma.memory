@@ -266,31 +266,32 @@ Items for future releases, roughly prioritized:
 ### High Priority (v0.2.1 Focus)
 | ID | Item | Description | Target |
 |----|------|-------------|--------|
-| F-01 | Frame Support (Prototyping) | Frame ops for dynamic/reclaiming slabs | v0.2.1 |
+| F-01 | Frame Support (Prototyping) | Frame ops for SLB0 and dynamic/reclaiming slabs | v0.2.1 |
 | F-02 | Standard Arena/Frame API | User-facing frame create/dispose/introspect | v0.2.1 |
-| F-03 | Thread-Safety Core | Lock strategy, atomic ops, safety analysis | v0.2.1 |
-| F-04 | Concurrency Performance | Multi-threaded benchmarks, contention fixes | v0.2.1 |
+| F-03 | Thread-Friendly Architecture | Design hooks for external task management (Sigma.Tasking) | v0.2.1 |
+| F-04 | Arena Extensions | Multi-slab frame support, nested frames | v0.2.1 |
 
 ### Medium Priority (v0.3.0+)
 | ID | Item | Description | Target |
 |----|------|-------------|--------|
 | F-05 | User Arenas (SLB1-14) | Custom scopes, POLICY_RECLAIMING or BUMP | v0.3.0 |
-| F-06 | sys0_dispose Coalescing | Implement block merging for SYS0 | v0.3.0 |
-| F-07 | Tree Rebalancing | AVL or RB-tree for pathological cases | v0.3.0+ |
+| F-06 | Thread-Safety Implementation | Lock strategy with Sigma.Tasking integration | v0.3.0 |
+| F-07 | sys0_dispose Coalescing | Implement block merging for SYS0 | v0.3.0 |
+| F-08 | Tree Rebalancing | AVL or RB-tree for pathological cases | v0.3.0+ |
 
 ### Low Priority (Future)
 | ID | Item | Description | Target |
 |----|------|-------------|--------|
-| F-08 | Frame Checkpoints (Advanced) | Transactional save/restore for nested scopes | v0.3.0+ |
-| F-09 | Scope Introspection (Full) | Stats API (page_count, alloc_count, fragmentation) | v0.3.0+ |
-| F-10 | BUMP Policy Slabs | Simple bump allocator for deterministic use cases | v0.3.0+ |
-| F-11 | Allocation Hints | Size classes, burst patterns, best-fit vs first-fit | v0.3.0+ |
+| F-09 | Frame Checkpoints (Advanced) | Transactional save/restore for nested scopes | v0.3.0+ |
+| F-10 | Scope Introspection (Full) | Stats API (page_count, alloc_count, fragmentation) | v0.3.0+ |
+| F-11 | BUMP Policy Slabs | Simple bump allocator for deterministic use cases | v0.3.0+ |
+| F-12 | Allocation Hints | Size classes, burst patterns, best-fit vs first-fit | v0.3.0+ |
 
 ### Ideas / Exploration
 | ID | Item | Description | Notes |
 |----|------|-------------|-------|
-| I-01 | Log2 Size Classes | Bucketing for faster search (2^n bins) | Post-concurrency |
-| I-02 | Thread-Local Caches | Per-thread NodePool for lock-free allocs | Related to F-03 |
+| I-01 | Log2 Size Classes | Bucketing for faster search (2^n bins) | Post-frames |
+| I-02 | Per-Task Arena Contexts | Task-local slab assignments (Sigma.Tasking integration) | Requires F-06 |
 | I-03 | Memory Compaction | Defragment by moving allocations (handle-based) | Complex, far future |
 | I-04 | Debug Poisoning | Fill freed memory with 0xDEADBEEF | Useful for debugging |
 | I-05 | Scope Callbacks | Hooks for profiling (compile-guarded) | v0.3.0+ |
@@ -418,56 +419,60 @@ Intentional architectural choices for the v0.2.0 rewrite:
 
 ### v0.2.1 (Next - Q1 2026)
 
-**Theme:** Frame Support & Concurrency Foundation
+**Theme:** Arena/Frame Support & Thread-Friendly Architecture
 
 **Focus Areas:**
-1. **Frame Support in Prototyping**
+1. **Frame Support for SLB0** (Primary Deliverable)
    - Frame operations for dynamic slabs
-   - Frame support in reclaiming slabs
+   - Frame support in reclaiming slabs (B-tree contexts)
    - Checkpoint/restore mechanics
    - Nested frame validation
+   - Frame introspection (allocation count, memory usage)
 
 2. **Standard Arena/Frame API**
    - User-facing frame creation API
    - Frame disposal (rollback allocations)
-   - Frame introspection (allocation count, memory usage)
    - Integration with existing slab policies
+   - Multi-slab frame support (arena-wide frames)
 
-3. **Concurrency & Thread-Safety**
-   - Thread-safety analysis of current implementation
-   - Lock strategy design (per-slab vs global)
-   - Atomic operations for critical sections
-   - Thread-local caching exploration
+3. **Thread-Friendly Architecture**
+   - Design hooks for external task/scheduler management
+   - Document reentrancy requirements for Sigma.Tasking
+   - Identify state that must be task-local vs global
+   - Define integration points (no locks implemented yet)
 
-4. **Performance from Threading**
-   - Benchmark single-threaded baseline
-   - Multi-threaded allocation stress tests
-   - Identify and resolve contention points
-   - Scalability validation (2, 4, 8 threads)
+4. **Arena Extensions**
+   - Support for user arenas (SLB1-14 groundwork)
+   - Per-arena policies (POLICY_RECLAIMING, POLICY_BUMP prep)
+   - Arena introspection API
+
+**Architectural Philosophy:**
+Sigma.Memory is an **OS-level component** that will be managed by Sigma.Tasking. Rather than implementing thread-safety/concurrency internally (risking lock churn and overlap), we design **thread-friendly interfaces** that allow external task schedulers to coordinate access. This separation ensures clean layering and prevents architectural conflicts.
 
 **Deliverables:**
-- Frame API in prototyping mode (basic operations working)
-- Concurrency safety assessment with recommendations
-- Thread-safety implementation for core allocator
-- Performance baseline: single vs multi-threaded
-- Updated benchmarks and stress tests
+- Frame API working in SLB0 (prototyping complete)
+- Frame operations for dynamic and reclaiming slabs
+- Documentation: Thread-friendly design guide for Sigma.Tasking integration
+- Arena groundwork for multi-slab support
+- Updated benchmarks for frame overhead
 
 **Success Criteria:**
-- SigmaTest dogfooding reveals no critical bugs
+- SigmaTest dogfooding with frame-based test isolation
 - Frame operations validated in real-world scenarios
-- Thread-safe allocations with minimal contention
-- Performance scales reasonably with thread count
+- Clear integration path documented for Sigma.Tasking
+- No performance regression from frame infrastructure
 
 ---
 
 ### v0.3.0 (Future - Q2 2026)
 
-**Theme:** Production Multi-Slab & Advanced Policies
+**Theme:** Production Multi-Slab, Policies & Thread-Safety
 
 **Planned:**
 - User arenas (SLB1-SLB14) - production ready
 - POLICY_BUMP slabs (deterministic allocation)
 - POLICY_RECLAIMING slabs (B-Tree backed)
+- Thread-safety implementation (with Sigma.Tasking integration)
 - Scope introspection API (full stats)
 - sys0_dispose coalescing
 - Advanced frame operations (transactional, nested)
@@ -480,8 +485,8 @@ Intentional architectural choices for the v0.2.0 rewrite:
 | ID | Issue | Status | Notes |
 |----|-------|--------|-------|
 | KI-03 | No frame support yet | Tracked | Planned for v0.2.1 |
-| KI-04 | Not thread-safe | Tracked | Planned for v0.2.1 |
-| KI-05 | Single-threaded only | Tracked | Concurrent access will corrupt state |
+| KI-04 | Not thread-safe | Tracked | Thread-friendly design in v0.2.1, implementation in v0.3.0 |
+| KI-05 | Single-threaded only | Tracked | Will be managed by Sigma.Tasking (v0.3.0) |
 
 ### v0.2.0-alpha (Resolved)
 | ID | Issue | Status | Resolution |
