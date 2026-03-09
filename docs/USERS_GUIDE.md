@@ -110,6 +110,7 @@ typedef size_t usize;    // Unsigned size type
 |----------|-------------|
 | `Allocator.alloc(size)` | Allocate `size` bytes from current scope |
 | `Allocator.dispose(ptr)` | Release memory back to its scope |
+| `Allocator.realloc(ptr, size)` | Resize allocation: shrinks in-place, grows via alloc+copy+dispose; `NULL` ptr → alloc; `size=0` → dispose |
 
 ### Scope Interface (Advanced)
 

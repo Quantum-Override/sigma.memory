@@ -1,0 +1,10 @@
+[2] Frame Interface: Explicit Scope Targeting :    6 : 2026-03-09  14:01:43     
+================================================================================
+Running: FI-01: Frame.begin() uses R7                        18878.062 ms [PASS]
+Running: FI-02: Frame.end() decrements depth                  5236.893 ms [PASS]
+Running: FI-03: Frame.begin_in() does not change R7           7892.519 ms [PASS]
+Running: FI-04: Frame.end_in() does not change R7             1807.660 ms [PASS]
+Running: FI-05: Frame.depth() tracks nesting                  1937.888 ms [PASS]
+Running: FI-06: Frame.depth_of() queries specific scope       1820.513 ms [PASS]
+================================================================================
+[2]     TESTS=  6        PASS=  6        FAIL=  0        SKIP=  0

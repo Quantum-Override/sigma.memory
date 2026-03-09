@@ -1,11 +1,11 @@
-[2] Memory: SYS0 Bootstrapping :    7 : 2026-03-08  15:18:58                    
+[2] Memory: SYS0 Bootstrapping :    7 : 2026-03-09  14:01:41                    
 ================================================================================
-Running: SYS0: initialized                                       3.129 ms [PASS]
-Running: SYS0: memory alignment check                            1.573 ms [PASS]
-Running: SYS0: init single free block                            1.707 ms [PASS]
-Running: SYS0: basic allocation                                  2.176 ms [PASS]
-Running: SYS0: zero size alloc -> NULL                           1.421 ms [PASS]
-Running: SYS0: alloc leaves free block                           1.738 ms [PASS]
-Running: SYS0: slab table allocation                             3.776 ms [PASS]
+Running: SYS0: initialized                                    4374.831 ms [PASS]
+Running: SYS0: memory alignment check                          736.339 ms [PASS]
+Running: SYS0: init single free block                         2052.019 ms [PASS]
+Running: SYS0: basic allocation                               6865.547 ms [PASS]
+Running: SYS0: zero size alloc -> NULL                         973.412 ms [PASS]
+Running: SYS0: alloc leaves free block                        2947.725 ms [PASS]
+Running: SYS0: slab table allocation                          3012.228 ms [PASS]
 ================================================================================
 [2]     TESTS=  7        PASS=  7        FAIL=  0        SKIP=  0

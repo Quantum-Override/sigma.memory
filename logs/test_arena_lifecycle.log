@@ -1,9 +1,9 @@
-[2] Arena: Lifecycle via Allocator :    5 : 2026-03-08  15:33:56                
+[2] Arena: Lifecycle via Allocator :    5 : 2026-03-09  14:01:41                
 ================================================================================
-Running: ALC-01: Create single arena                         13080.018 ms [PASS]
-Running: ALC-02: Create multiple arenas                       3024.783 ms [PASS]
-Running: ALC-03: Arena exhaustion (max 14)                    5330.001 ms [PASS]
-Running: ALC-04: Arena name truncation                        1396.540 ms [PASS]
-Running: ALC-05: Dispose arena clears slot                     929.520 ms [PASS]
+Running: ALC-01: Create single arena                         10863.680 ms [PASS]
+Running: ALC-02: Create multiple arenas                       2444.003 ms [PASS]
+Running: ALC-03: Arena exhaustion (max 14)                    3886.717 ms [PASS]
+Running: ALC-04: Arena name truncation                        1036.760 ms [PASS]
+Running: ALC-05: Dispose arena clears slot                     726.909 ms [PASS]
 ================================================================================
 [2]     TESTS=  5        PASS=  5        FAIL=  0        SKIP=  0

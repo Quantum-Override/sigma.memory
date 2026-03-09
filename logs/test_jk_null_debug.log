@@ -1,0 +1,15 @@
+[2] JK Null Debug             :    5 : 2026-03-09  10:54:57                     
+================================================================================
+Running: JK-01 full                              
+  - Expected true, but was false
+    - JK-01: slb0 frame must track its allocation
+                                                                28.849 ms [FAIL]
+Running: JK-02 full                                             42.992 ms [PASS]
+Running: JK-03 full                                             53.015 ms [PASS]
+Running: JK-04 full                                             16.182 ms [PASS]
+Running: JK-05 full                              
+  - Expected true, but was false
+    - JK-05: frame must track in-frame allocation
+                                                                16.216 ms [FAIL]
+================================================================================
+[2]     TESTS=  5        PASS=  3        FAIL=  2        SKIP=  0
