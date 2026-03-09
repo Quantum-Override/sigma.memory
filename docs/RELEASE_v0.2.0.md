@@ -383,7 +383,7 @@ LEAK SUMMARY: 0 bytes in 0 blocks
 ## 🎓 Learn More
 
 - [Memory Design](MEMORY_DESIGN.md) - MTIS architecture deep dive
-- [User's Guide](USERS_GUIDE.md) - API reference and examples
+- [Users Guide](USERS_GUIDE.md) - API reference and examples
 - [Roadmap](ROADMAP.md) - Future development plans
 - [Building](../BUILDING.md) - Compilation instructions
 

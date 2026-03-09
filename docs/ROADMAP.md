@@ -28,7 +28,7 @@
 - `test/unit/test_skiplist_correctness.c` — SLC-01..04: B-tree reuse, coalesced free, Task 7 regression guard, full-cycle re-alloc
 
 **Documentation:**
-- ✅ USERS_GUIDE.md: `Allocator.realloc` added to API table
+- ✅ Users Guide: `Allocator.realloc` added to API table
 - ✅ MEMORY_REFERENCE.md: `Allocator.realloc` added to API quick-reference
 - ✅ All tests validated under valgrind, 0 bytes leaked
 
@@ -58,7 +58,7 @@
 - 8KB pages with 8128 bytes usable (99.2% efficiency)
 
 **Documentation:**
-- ✅ USERS_GUIDE.md: Arena API with examples
+- ✅ Users Guide: Arena API with examples
 - ✅ MEMORY_REFERENCE.md: Technical architecture updated
 - ✅ All tests documented and validated
 
@@ -429,7 +429,7 @@ Intentional architectural choices for the v0.2.0 rewrite:
 - SLB0 user allocator (16 pages, hybrid bump + free list)
 - Page release on empty
 - 30 tests passing (10 bootstrap + 20 slab0)
-- Documentation: MEMORY_DESIGN, MEMORY_REFERENCE, USERS_GUIDE
+- Documentation: MEMORY_DESIGN, MEMORY_REFERENCE, Users Guide
 
 ---
 

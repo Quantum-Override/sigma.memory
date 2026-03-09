@@ -92,7 +92,7 @@ A high-performance C memory allocator with B-tree external metadata architecture
 - **Zero Configuration** - Auto-initializes before `main()`
 - **Simple API** - `Allocator.alloc()` / `Allocator.dispose()` / `Allocator.frame_*()`
 - **TDD Validated** - 45+ tests covering bootstrap, btree, integration, stress, performance
-- **Well Documented** - Architecture guide, API reference, user's guide
+- **Well Documented** - Architecture guide, API reference, Users Guide
 
 ## Quick Start
 
@@ -176,7 +176,7 @@ gcc myapp.c sigma.memory/build/*.o -Isigma.memory/include -o myapp
 
 | Document | Description |
 |----------|-------------|
-| [USERS_GUIDE.md](docs/USERS_GUIDE.md) | How to use the library |
+| [Users Guide](docs/USERS_GUIDE.md) | How to use the library |
 | [ROADMAP.md](docs/ROADMAP.md) | Backlog, priorities, version plans |
 | [MEMORY_REFERENCE.md](docs/MEMORY_REFERENCE.md) | Technical architecture |
 | [MEMORY_DESIGN.md](docs/MEMORY_DESIGN.md) | Design rationale |

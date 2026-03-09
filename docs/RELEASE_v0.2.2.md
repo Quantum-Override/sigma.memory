@@ -325,7 +325,7 @@ Allocator.dispose_arena(req_arena);
 
 ## Documentation Updates
 
-- ✅ **USERS_GUIDE.md:** Updated to v0.2.2-arenas with comprehensive Arena API documentation
+- ✅ **Users Guide:** Updated to v0.2.2-arenas with comprehensive Arena API documentation
 - ✅ **MEMORY_REFERENCE.md:** Updated architecture sections with arena implementation details
 - ✅ **ROADMAP.md:** Marked v0.2.2 Phase 1 Week 1 as complete
 - ✅ **RELEASE_v0.2.2.md:** This document

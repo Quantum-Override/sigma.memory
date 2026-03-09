@@ -1,4 +1,4 @@
-# SigmaCore Memory - User's Guide
+# SigmaCore Memory - Users Guide
 
 **Version:** 0.2.3-realloc  
 **Date:** March 9, 2026
@@ -242,11 +242,9 @@ void nested_frames(void) {
 
 | Resource | Size | Notes |
 |----------|------|-------|
-| User memory (SLB0) | 64 KB | 16 pages × 4KB |
-| Max allocation | ~4032 bytes | Single page minus sentinel |
+| User memory (SLB0) | 128 KB initial, grows dynamically | 16 initial pages × 8KB; overflow pages released when empty |
+| Max allocation | ~8136 bytes | Single page minus metadata (sentinel + header + footer) |
 | Minimum allocation | 16 bytes | Aligned to `kAlign` |
-
-> **Note:** Dynamic page growth is planned for v0.2. Current version has fixed 64KB pool.
 
 ---
 
@@ -277,8 +275,8 @@ void nested_frames(void) {
 
 ### Allocation Returns NULL
 
-1. **Requested size exceeds page capacity** (~4032 bytes max)
-2. **All pages exhausted** (64KB limit reached)
+1. **Requested size exceeds page capacity** (~8136 bytes max per page)
+2. **Requested size too large** (single allocation cannot span pages)
 3. **Zero-size request** (intentional)
 
 ### Valgrind Reports "still reachable"
@@ -416,6 +414,33 @@ void example_multiple_arenas(void) {
 
 ---
 
+## Realloc API (v0.2.3+)
+
+`Allocator.realloc` resizes an existing allocation. Shrinks in-place; grows by allocating a new block, copying data, and freeing the old one.
+
+```c
+// NULL ptr → acts like alloc
+object buf = Allocator.realloc(NULL, 256);
+
+// Grow: new block allocated, data copied, old block freed
+buf = Allocator.realloc(buf, 1024);
+
+// Shrink: same pointer returned, freed remainder re-enters pool
+buf = Allocator.realloc(buf, 64);
+
+// Zero size → acts like dispose
+buf = Allocator.realloc(buf, 0);  // returns NULL
+```
+
+| Case | Behavior |
+|------|----------|
+| `realloc(NULL, size)` | Equivalent to `alloc(size)` |
+| `realloc(ptr, 0)` | Equivalent to `dispose(ptr)`, returns `NULL` |
+| `realloc(ptr, smaller)` | Shrinks in-place; same pointer returned |
+| `realloc(ptr, larger)` | New block + memcpy + free old; new pointer returned |
+
+---
+
 ## Roadmap
 
 | Version | Features |
@@ -430,6 +455,6 @@ void example_multiple_arenas(void) {
 
 ## See Also
 
-- [MEMORY_REFERENCE.md](MEMORY_REFERENCE.md) - Technical architecture details
-- [MEMORY_DESIGN.md](MEMORY_DESIGN.md) - Design rationale and decisions
-- [BUILDING.md](../BUILDING.md) - Build system documentation
+- [Memory Reference](MEMORY_REFERENCE.md) - Technical architecture details
+- [Memory Design](MEMORY_DESIGN.md) - Design rationale and decisions
+- [Building](../BUILDING.md) - Build system documentation
