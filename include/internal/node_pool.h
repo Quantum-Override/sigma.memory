@@ -185,6 +185,26 @@ btree_node nodepool_get_btree_node(scope scope_ptr, node_idx idx);
  */
 nodepool_header *nodepool_get_header(scope scope_ptr);
 
+/**
+ * @brief Free a btree_node back to the per-scope NodePool free list
+ * @param scope_ptr Pointer to sc_scope structure
+ * @param idx btree_node index to recycle (NODE_NULL is a no-op)
+ *
+ * Stores the next-free chain in node->left_idx.  Zero-cost vs bump growth.
+ */
+void nodepool_free_btree_node(scope scope_ptr, node_idx idx);
+
+/**
+ * @brief Purge all B-tree nodes for a page and return them to the free list
+ * @param scope_ptr Pointer to sc_scope structure
+ * @param page_idx Page node whose B-tree will be cleared
+ * @return OK on success, ERR if page_node not found
+ *
+ * After purge: page->btree_root == NODE_NULL, page->block_count == 0.
+ * Must be called before releasing an empty page (skiplist_remove + munmap).
+ */
+int btree_page_purge(scope scope_ptr, uint16_t page_idx);
+
 // ============================================================================
 // Phase 7: Skip List Operations (Page Directory)
 // ============================================================================

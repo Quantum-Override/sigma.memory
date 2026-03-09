@@ -1,9 +1,9 @@
-[2] Arena: Disposal Comprehensive :    5 : 2026-03-08  16:01:08                 
+[2] Arena: Disposal Comprehensive :    5 : 2026-03-09  14:01:40                 
 ================================================================================
-Running: ADS-01: Dispose empty arena                         14558.688 ms [PASS]
-Running: ADS-02: Dispose multiple arenas                      3207.838 ms [PASS]
-Running: ADS-03: Dispose with active frames                  14839.574 ms [PASS]
-Running: ADS-04: Multiple create-dispose cycles               4766.140 ms [PASS]
-Running: ADS-05: Dispose validation                           2247.293 ms [PASS]
+Running: ADS-01: Dispose empty arena                         13174.463 ms [PASS]
+Running: ADS-02: Dispose multiple arenas                      2961.987 ms [PASS]
+Running: ADS-03: Dispose with active frames                  17729.226 ms [PASS]
+Running: ADS-04: Multiple create-dispose cycles               3820.408 ms [PASS]
+Running: ADS-05: Dispose validation                           1906.438 ms [PASS]
 ================================================================================
 [2]     TESTS=  5        PASS=  5        FAIL=  0        SKIP=  0

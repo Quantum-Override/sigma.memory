@@ -48,10 +48,11 @@
 #define SYS0_NODE_STACK_SIZE 128                 // 128 bytes (NodeStack depth + 15 slots)
 #define SYS0_RESERVED_SIZE 1536                  // 1536 bytes (478-1536 unused: 1058 bytes)
 #define FIRST_BLOCK_OFFSET (SYS0_RESERVED_SIZE)  // 1536
+
 #define LAST_FOOTER_OFFSET (SYS0_PAGE_SIZE - sizeof(sc_blk_footer))  // 8184
 // Scope table layout (in SYS0 data area, not reserved)
 #define SCOPE_TABLE_COUNT 16  // 16 scope entries
-#define SCOPE_ENTRY_SIZE 64   // Each scope entry is 64 bytes
+#define SCOPE_ENTRY_SIZE 96   // Each scope entry: sizeof(sc_scope) — keep in sync
 
 #if 1  // Region: Two Phase Memory Initilization
 /*
@@ -157,7 +158,7 @@ typedef struct sc_node *btree_node;
 
 // Frame constants
 #define FRAME_CHUNK_SIZE 4096  // 4KB chunks for frame allocations
-#define MAX_FRAME_DEPTH 16     // Maximum nesting depth for frames
+#define MAX_FRAME_DEPTH 1      // Maximum depth per scope: single active frame
 
 // NodePool header structure (40 bytes) - Phase 7 two-tier architecture
 // Initial size: 2KB (small start, grows dynamically via mremap)
@@ -167,9 +168,10 @@ typedef struct nodepool_header {
     usize page_count;          // 8: Number of pages in skip list
     usize page_alloc_offset;   // 8: Next free page_node slot (grows up from header)
     usize btree_alloc_offset;  // 8: Next free btree_node slot (grows down from top)
-    uint16_t skip_list_head;   // 2: Index of first page_node in skip list
-    uint16_t _reserved[7];     // 14: Reserved for future use
-} nodepool_header;             // Total: 40 bytes
+    uint16_t skip_list_head;    // 2: Index of first page_node in skip list
+    uint16_t btree_free_head;   // 2: Head of recycled btree_node free list (NODE_NULL = empty)
+    uint16_t _reserved[6];      // 12: Reserved for future use
+} nodepool_header;              // Total: 40 bytes
 
 // Page directory node (20 bytes) - Skip list entry for page tracking
 typedef struct page_node {
@@ -257,14 +259,17 @@ typedef struct sc_scope {
     char name[16];          // 16: Inline scope name (null-terminated)
     addr nodepool_base;     // 8: Base address of per-scope NodePool mmap
 
-    // Frame support (extends beyond 64 bytes - acceptable for v0.2.1)
-    uint16_t current_frame_idx;                   // Active frame_node (NODE_NULL if none)
-    uint16_t current_chunk_idx;                   // Current chunk being allocated from
-    uint16_t frame_counter;                       // Unique frame_id generator
-    uint8_t frame_depth;                          // Current nesting level (0-16)
-    uint8_t _frame_pad;                           // Alignment padding
-    sc_frame_state frame_stack[MAX_FRAME_DEPTH];  // LIFO nesting stack (16 * 8 = 128 bytes)
-} sc_scope;  // Total: 64 + 8 + 128 = 200 bytes (with frame support)
+    // Frame support (v0.2.3: single active frame per scope; prev-chain replaces R7 stack)
+    uint16_t current_frame_idx;   // Head chunk node index (NODE_NULL when no frame active)
+    uint16_t current_chunk_idx;   // Current bump chunk (may differ from head after chaining)
+    uint16_t frame_counter;       // Monotonic frame ID generator (never reset)
+    bool     frame_active;        // True when a frame is open on this scope
+    uint8_t  _frame_pad;          // Alignment padding
+    scope    prev;                // Previous scope in activation chain (NULL = root)
+    sc_frame_state active_frame;  // Current frame state (valid only when frame_active)
+} sc_scope;  // Total: 96 bytes (verified by _Static_assert below)
+_Static_assert(sizeof(sc_scope) == SCOPE_ENTRY_SIZE,
+               "SCOPE_ENTRY_SIZE must equal sizeof(sc_scope) — update the define");
 #endif
 
 #if 1  // Region: Internal Memory Interface

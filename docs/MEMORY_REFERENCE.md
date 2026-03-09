@@ -1078,8 +1078,9 @@ Page 0                    Page 1                    Page N
 
 ```c
 // Top-level (uses current scope from R7)
-Allocator.alloc(size)        // Allocate from current scope
-Allocator.dispose(ptr)       // Dispose to current scope
+Allocator.alloc(size)              // Allocate from current scope
+Allocator.dispose(ptr)             // Dispose to current scope
+Allocator.realloc(ptr, size)       // Resize: in-place shrink or alloc+copy+dispose grow
 
 // Explicit scope operations
 Allocator.Scope.current()    // Get current scope pointer
