@@ -177,6 +177,7 @@ gcc myapp.c sigma.memory/build/*.o -Isigma.memory/include -o myapp
 | Document | Description |
 |----------|-------------|
 | [Users Guide](docs/USERS_GUIDE.md) | How to use the library |
+| [BACKLOG.md](docs/BACKLOG.md) | Known gaps, bugs, and feature backlog |
 | [ROADMAP.md](docs/ROADMAP.md) | Backlog, priorities, version plans |
 | [MEMORY_REFERENCE.md](docs/MEMORY_REFERENCE.md) | Technical architecture |
 | [MEMORY_DESIGN.md](docs/MEMORY_DESIGN.md) | Design rationale |
