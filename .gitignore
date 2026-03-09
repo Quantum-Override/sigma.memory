@@ -4,3 +4,4 @@
 /package
 *.o
 *.bak
+/package
