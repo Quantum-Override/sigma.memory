@@ -1,7 +1,7 @@
 # SigmaCore Memory - User's Guide
 
-**Version:** 0.2.2-arenas  
-**Date:** March 8, 2026
+**Version:** 0.2.3-realloc  
+**Date:** March 9, 2026
 
 ---
 
@@ -293,7 +293,8 @@ If you see ~2KB "still reachable" from sigtest framework, this is expected and n
 | 0.1.0 | 2026-01-29 | Initial release: SYS0 bootstrap, SLB0 user allocator |
 | 0.2.0 | 2026-02-12 | B-tree external metadata, dynamic NodePool growth |
 | 0.2.1 | 2026-03-08 | Frame support (chunk-based bump allocator) |
-| **0.2.2** | **2026-03-08** | **User arenas (14 concurrent arenas, simple bump allocation)** |
+| 0.2.2 | 2026-03-08 | User arenas (14 concurrent arenas, simple bump allocation) |
+| **0.2.3** | **2026-03-09** | **`Allocator.realloc`, SLB0 dynamic page release, skip list correctness fix** |
 
 ---
 
@@ -409,7 +410,7 @@ void example_multiple_arenas(void) {
 
 - **No individual deallocation**: Must dispose entire arena
 - **14 arena limit**: System maximum (SLB1-14)
-- **Single-threaded**: Not thread-safe in v0.2.2
+- **Single-threaded**: Not thread-safe in v0.2.3
 - **Linear allocation only**: No free list or reuse within arena
 
 ---
@@ -418,8 +419,9 @@ void example_multiple_arenas(void) {
 
 | Version | Features |
 |---------|----------|
-| **0.2.2** | ✅ **User arenas (14 concurrent, simple bump allocation)** |
-| 0.2.3 | Arena frames (frame support within arenas) |
+| 0.2.2 | ✅ User arenas (14 concurrent, simple bump allocation) |
+| **0.2.3** | ✅ **`Allocator.realloc`, dynamic page release, skip list fix** |
+| 0.2.4 | Arena frames (frame support within arenas) |
 | 0.3.0 | Thread-safety, advanced policies |
 | 1.0.0 | Full API stability, production-ready |
 
