@@ -1,29 +1,30 @@
 # SigmaCore Memory System - Architecture & Reference Guide
 
-**Version:** 0.2.0-alpha  
-**Date:** February 12, 2026  
-**Status:** Alpha Release (Critical bugfix + 2KB NodePool + Dynamic growth)
+**Version:** 0.2.2-arenas  
+**Date:** March 8, 2026  
+**Status:** Beta Release (User Arenas + Dynamic NodePool Growth)
 
 ---
 
 ## 1. Overview
 
-The SigmaCore memory management system implements a **B-Tree external metadata architecture** with register-based operation model:
+The SigmaCore memory management system implements a **B-Tree external metadata architecture** with scope-based allocation:
 
 | Component | Description | Strategy |
 |-----------|-------------|----------|
 | **SYS0** | Bootstrap allocator (8KB static page) | First-fit reclaiming |
-| **NodePool** | B-Tree metadata (2KB initial, grows to 32KB+) | External allocation tracking |
-| **SLB0** | User-space allocator (16 pages) | 100% page utilization |
-| **SLBn** | User-defined arenas (scope_table[2-15]) | Per-slab B-Trees |
+| **NodePool** | B-Tree metadata (8KB initial, grows dynamically) | External allocation tracking |
+| **SLB0** | Default user allocator (dynamic) | MTIS (Multi-Tier Index Search) |
+| **Arenas** | User-defined scopes (slots 2-15) | Simple bump allocation |
 
-### Key Design Decisions (v0.2.0)
+### Key Design Decisions (v0.2.2)
 
 - **External Metadata**: B-Tree nodes stored outside user pages (100% page utilization)
-- **Register Machine Model**: R1 (NodePool base), R2 (operation results), stack-based params
-- **Per-Slab B-Trees**: Each slab maintains its own allocation tree (selective complexity)
-- **Log2 Hints**: 8-bit log2 encoding represents 2^0 to 2^255 bytes for first-fit optimization
+- **Dynamic Growth**: NodePool grows via mremap() with capacity doubling
+- **Scope Isolation**: Independent allocation domains (SYS0, SLB0, 14 user arenas)
+- **Simple Arenas**: Bump allocation within 8KB pages (no MTIS overhead)
 - **24-byte Nodes**: Cache-friendly metadata (3 nodes per 64-byte cache line)
+- **Arena Simplicity**: No individual deallocation, arena-wide disposal only
 
 ---
 
@@ -53,25 +54,60 @@ DATA AREA (1536-8191)
 Total:      8192 bytes (6656 bytes DAT available)
 ```
 
-### 2.2 NodePool (2KB Initial, Grows Dynamically)
+### 2.2 NodePool (8KB Initial, Grows Dynamically)
 
 ```
-Index       Size    Content                    
+v0.2.2: Dynamic Growth Architecture
 ────────────────────────────────────────────────────────
-0           24      [Reserved - NODE_NULL sentinel]
-1-82        24×82   B-Tree nodes (initial capacity)
+Initial:  8KB (407 page_nodes or 339 btree_nodes)
+Growth:   8KB → 16KB → 32KB → 64KB → ... (doubles)
+Method:   mremap(MREMAP_MAYMOVE) with data relocation
 ────────────────────────────────────────────────────────
-Total:      2KB (83 nodes × 24 bytes) initial
-Growth:     2KB → 4KB → 8KB → 16KB → 32KB (doubles)
+
+NodePool Layout:
+Offset      Size    Content                    
+────────────────────────────────────────────────────────
+0           40      nodepool_header (capacity, allocators)
+40          20×N    page_node array (grows up)
+...         ...     [free space]
+...         24×M    btree_node array (grows down from top)
+────────────────────────────────────────────────────────
+
+Growth Trigger:
+- page_nodes: when page_alloc_offset meets btree region
+- btree_nodes: when btree_alloc_offset meets page region
+- Both: checked on every allocation attempt
+
+Growth Process:
+1. Calculate new_capacity = old_capacity * 2
+2. mremap(old_base, old_capacity, new_capacity, MREMAP_MAYMOVE)
+3. If base moved, update scope->nodepool_base
+4. Relocate btree_nodes to new top: memmove(new_top, old_top, btree_bytes)
+5. Update btree_alloc_offset to new top
+6. Continue allocation from expanded space
 ```
 
 **NodePool Characteristics:**
-- Separate mmap allocation (starts small, grows on demand)
-- Base address cached in R1 register
-- LIFO free list (uses left_idx as next pointer)
-- O(1) indexed access: `base + (idx × 24)`
+- Separate mmap allocation per scope (SYS0, SLB0, each arena)
+- Base address cached in scope->nodepool_base
+- Top-down btree growth, bottom-up page growth
+- Critical: btree data must be relocated after mremap
+- O(1) indexed access: `base + (idx × node_size)`
 
-### 2.3 Layout Constants
+**Growth Example:**
+```
+Initial 8KB:
+[header][page_nodes...][free space][...btree_nodes]
+   40        ↑                             ↑
+           page_off                    btree_off
+
+After growth to 16KB (base may move):
+[header][page_nodes...][larger free space][...btree_nodes]
+   40        ↑                                     ↑
+           page_off                            btree_off (relocated)
+```
+
+### 2.3 User Arena Pages (8KB Each)
 
 ```c
 // SYS0 Layout (v0.2.0)
@@ -168,15 +204,25 @@ typedef struct sc_node {
     // Bits 0-7:   log2(max_free_size) - 2^0 to 2^255 bytes
     // Bit 8:      direction (0=left, 1=right subtree has max)
     // Bit 9:      FREE_FLAG (this node is free)
-    // Bits 10-15: reserved for future use
-    uint8_t _reserved[6]; //  6: reserved for future extensions
+    // Bit 10:     FRAME_FLAG (this node is a frame chunk)
+    // Bits 11-15: reserved for future use
+    union {
+        uint8_t _reserved[6];  //  6: reserved (normal nodes)
+        struct {               //  6: frame-specific data (when FRAME_FLAG set)
+            usize frame_offset;      // Current bump offset in chunk
+            uint16_t next_chunk_idx; // Next 4KB chunk (or NODE_NULL)
+            uint16_t frame_id;       // Frame identifier
+            uint16_t _pad[3];
+        } frame;
+    };
 } sc_node;               // 24: Total (3 nodes per 64B cache line)
 
 // Bit masks for info field
 #define NODE_SIZE_MASK     0x00FF  // Bits 0-7: log2 size
 #define NODE_DIRECTION_BIT 0x0100  // Bit 8: direction  
 #define NODE_FREE_FLAG     0x0200  // Bit 9: free flag
-#define NODE_RESERVED_MASK 0xFC00  // Bits 10-15: reserved
+#define FRAME_NODE_FLAG    0x0400  // Bit 10: frame chunk flag (v0.2.1+)
+#define NODE_RESERVED_MASK 0xF800  // Bits 11-15: reserved
 ```
 
 **Node Design Rationale:**
@@ -184,6 +230,7 @@ typedef struct sc_node {
 - **No in-page metadata**: User pages are 100% payload
 - **Log2 hints**: 8 bits represent sizes from 1 byte (2^0) to huge (2^255)
 - **Bit-packed flags**: Saves separate flag field, keeps structure lean
+- **Frame union (v0.2.1+)**: Reuses _reserved[6] for frame-specific data when FRAME_NODE_FLAG set
 
 ### 3.3 NodeStack (128 bytes in SYS0)
 
@@ -222,9 +269,15 @@ node_idx result = /* read R2 */;
 Stack.clear();
 ```
 
-### 3.4 Scope Entry (64 bytes)
+### 3.4 Scope Entry (200 bytes - Expanded for Frame Support v0.2.1+)
 
 ```c
+typedef struct sc_frame_state {
+    uint16_t frame_id;       // Opaque frame handle
+    uint16_t head_chunk_idx; // First chunk node in frame
+    usize total_allocated;   // Total bytes allocated in frame
+} sc_frame_state;  // 12 bytes
+
 typedef struct sc_scope {
     usize scope_id;         //  8: Index in scope_table
     sbyte policy;           //  1: SCOPE_POLICY_*
@@ -234,8 +287,20 @@ typedef struct sc_scope {
     addr current_page_off;  //  8: Current (active) page
     usize page_count;       //  8: Pages in chain
     char name[16];          // 16: Inline name
-    addr reserved[1];       //  8: Reserved
-} sc_scope;                 // Total: 64 bytes
+    
+    // Frame support (v0.2.1+)
+    uint16_t current_frame_idx;  //  2: Active frame chunk
+    uint16_t current_chunk_idx;  //  2: Current chunk in frame
+    uint16_t frame_counter;      //  2: Next frame_id
+    uint16_t frame_depth;        //  2: Current nesting depth (0-16)
+    sc_frame_state frame_stack[16]; // 192: LIFO frame stack
+    
+    addr reserved[1];       //  8: Reserved (future extensions)
+} sc_scope;                 // Total: 256 bytes (expanded from 64)
+
+// Frame constants
+#define FRAME_CHUNK_SIZE 4096  // 4KB per chunk
+#define MAX_FRAME_DEPTH 16     // Maximum frame nesting
 ```
 
 **Scope Table Layout:**
@@ -243,9 +308,225 @@ typedef struct sc_scope {
 |-------|-------|--------|-------|
 | 0 | SYS0 | RECLAIMING | PROTECTED \| PINNED |
 | 1 | SLB0 | DYNAMIC | SECURE |
-| 2-15 | User arenas | User-defined | User-defined |
+| 2-15 | User arenas (v0.2.2+) | User-defined | User-defined |
 
-### 3.5 Block Header (16 bytes)
+**Arena Support Notes (v0.2.2+):**
+- Arenas use simple bump allocation within 8KB pages
+- Each arena has its own NodePool and PageList
+- Maximum 14 concurrent user arenas (slots 2-15)
+- Each arena allocated via mmap, cleaned up with munmap
+- No MTIS overhead - direct offset-based allocation
+- Disposal unmaps all pages and shuts down arena's NodePool
+
+**Frame Support Notes (v0.2.1, deprecated in v0.2.2):**
+- Frames were chunked bump allocators (4KB chunks)
+- Frame API removed in favor of user arenas
+- Arenas provide similar scope isolation with better performance
+
+### 3.5 Arena Architecture (v0.2.2+)
+
+#### 3.5.1 Arena Design Principles
+
+**Why Arenas?**
+- **Scope isolation**: Separate user-controlled memory regions
+- **Bulk disposal**: Free entire arena at once (O(1) cleanup)
+- **Predictable performance**: No search, no fragmentation
+- **Simple allocation**: Bump pointer - O(1), no metadata traversal
+
+**Comparison to MTIS (SLB0):**
+| Feature | SLB0 (MTIS) | Arena (Bump) |
+|---------|-------------|--------------|
+| Allocation speed | O(log n) B-tree search | O(1) bump pointer |
+| Individual deallocation | ✓ (mark node free) | ✗ (arena-wide only) |
+| Fragmentation | Coalescing required | None (sequential) |
+| Overhead per allocation | 24 bytes (btree_node) | 0 bytes |
+| Use case | General-purpose heap | Scope-bound allocations |
+
+#### 3.5.2 Arena Scope Structure
+
+```c
+typedef struct sc_scope_s {
+    usize scope_id;                  // 0=SYS0, 1=SLB0, 2-15=arenas
+    string name;                     // "SYS0", "SLB0", or user name
+    uint flags;                      // SECURE, PROTECTED, PINNED, etc.
+    uint policy;                     // RECLAIMING, DYNAMIC, FIXED
+    
+    // Arena-specific fields (v0.2.2+)
+    addr nodepool_base;              // Arena's NodePool base address
+    usize nodepool_capacity;         // Current capacity (grows dynamically)
+    usize page_alloc_offset;         // page_node allocation offset
+    usize btree_alloc_offset;        // btree_node allocation offset (from top)
+    
+    addr current_page;               // Current page for bump allocation
+    usize current_offset;            // Offset within current_page
+    addr pagelist_head;              // First page in arena's page chain
+    
+    // (Other fields: registers, stack, btree_root, etc.)
+} sc_scope;
+```
+
+**Key Arena Fields:**
+- `nodepool_base`: Each arena has own NodePool (starts 8KB, grows dynamically)
+- `current_page`: Active page for bump allocations
+- `current_offset`: Next allocation offset (0-8160, within page)
+- `pagelist_head`: Head of linked page chain (for disposal)
+
+#### 3.5.3 Arena Page Layout (8KB)
+
+```
+Arena Page Structure:
+Offset      Size    Content                    
+────────────────────────────────────────────────────────
+0           32      page_sentinel (magic, size, flags, prev/next)
+32          8128    usable space for bump allocations
+8160        32      footer_sentinel (magic, size, scope_id)
+────────────────────────────────────────────────────────
+Total:      8192 bytes (8KB)
+Usable:     8128 bytes (99.2% efficiency)
+```
+
+**Page Sentinel (32 bytes):**
+```c
+typedef struct page_sentinel {
+    uint magic;         // 0xC0DEC0DE
+    uint size;          // 8192
+    uint flags;         // PAGE_SENTINEL
+    uint scope_id;      // 0-15
+    addr prev_page;     // Previous page in chain (or 0)
+    addr next_page;     // Next page in chain (or 0)
+    usize _reserved[2]; // Padding to 32 bytes
+} page_sentinel;
+```
+
+**Footer Sentinel (32 bytes):**
+```c
+typedef struct footer_sentinel {
+    uint magic;         // 0xDEADC0DE
+    uint size;          // 8192
+    uint scope_id;      // 0-15
+    uint _pad;
+    usize _reserved[3]; // Padding to 32 bytes
+} footer_sentinel;
+```
+
+#### 3.5.4 Arena Allocation Algorithm
+
+```c
+object arena_alloc(scope arena, usize size) {
+    // 1. Check if size fits in current page
+    if (arena->current_offset + size > 8128) {
+        // 2. Allocate new page via arena_alloc_new_page()
+        addr new_page = arena_alloc_new_page(arena);
+        if (new_page == ADDR_EMPTY) return NULL;  // mmap failed
+        
+        // 3. Link new page to chain
+        page_sentinel *sentinel = (page_sentinel*)new_page;
+        sentinel->next_page = ADDR_EMPTY;
+        sentinel->prev_page = arena->current_page;
+        
+        if (arena->current_page != ADDR_EMPTY) {
+            page_sentinel *old = (page_sentinel*)arena->current_page;
+            old->next_page = (addr)new_page;
+        } else {
+            arena->pagelist_head = (addr)new_page;  // First page
+        }
+        
+        // 4. Update current page
+        arena->current_page = (addr)new_page;
+        arena->current_offset = 32;  // Skip sentinel
+    }
+    
+    // 5. Bump allocate from current page
+    addr allocation = arena->current_page + arena->current_offset;
+    arena->current_offset += size;
+    
+    return (object)allocation;
+}
+```
+
+**Characteristics:**
+- **O(1) allocation**: Direct pointer arithmetic (no search)
+- **No metadata per allocation**: No btree_node overhead
+- **Page chaining**: When current page exhausted, allocate new page
+- **Page size**: Fixed 8KB (SYS0_PAGE_SIZE)
+
+#### 3.5.5 Arena Disposal Algorithm
+
+```c
+void arena_dispose_impl(scope arena) {
+    // 1. Dispose all pages in chain
+    addr current_page = arena->pagelist_head;
+    while (current_page != ADDR_EMPTY) {
+        page_sentinel *sentinel = (page_sentinel*)current_page;
+        addr next = sentinel->next_page;
+        
+        // Unmap page
+        munmap((void*)current_page, SYS0_PAGE_SIZE);
+        
+        current_page = next;
+    }
+    
+    // 2. Shutdown arena's NodePool
+    if (arena->nodepool_base != ADDR_EMPTY) {
+        munmap((void*)arena->nodepool_base, arena->nodepool_capacity);
+    }
+    
+    // 3. Clear scope entry in scope_table
+    Memory.dispose(arena->name);  // Free name string (in SYS0)
+    memset(arena, 0, sizeof(sc_scope));  // Zero scope struct
+    arena->scope_id = 0xFF;  // Mark as free
+}
+```
+
+**Disposal Performance:**
+- **O(P) where P = page count**: Simply unmap all pages
+- **No individual deallocation**: Bulk disposal only
+- **Clean shutdown**: munmap + NodePool cleanup
+- **Scope table reuse**: Slot becomes available for new arena
+
+#### 3.5.6 Arena Lifecycle Example
+
+```c
+// Create arena
+scope user_arena = Allocator.create_arena("WorkBuffer", SCOPE_POLICY_DYNAMIC);
+// Internally:
+//   - Allocate scope struct in scope_table[2-15]
+//   - Allocate initial 8KB NodePool via mmap
+//   - Allocate first 8KB page via mmap
+//   - Initialize sentinels, set current_offset = 32
+
+// Allocate from arena
+object ptr1 = Scope.alloc_for_scope(user_arena, 1024);  // offset 32
+object ptr2 = Scope.alloc_for_scope(user_arena, 2048);  // offset 1056
+object ptr3 = Scope.alloc_for_scope(user_arena, 8000);  // new page, offset 32
+
+// Dispose entire arena
+Allocator.dispose_arena(user_arena);
+// Internally:
+//   - munmap page 1 (8KB)
+//   - munmap page 2 (8KB)
+//   - munmap NodePool (8KB)
+//   - Clear scope_table entry
+//   - Slot 2 now available for reuse
+```
+
+#### 3.5.7 Arena Limitations
+
+1. **No individual deallocation**: Cannot free single allocations within arena
+2. **Maximum 14 arenas**: Scope table slots 2-15 (0=SYS0, 1=SLB0)
+3. **Single-threaded**: No thread-safety guarantees
+4. **Page size fixed**: All pages are 8KB (SYS0_PAGE_SIZE)
+5. **No coalescing**: Pages remain allocated until arena disposal
+
+**When to Use Arenas:**
+- ✓ Request processing (HTTP requests, jobs)
+- ✓ Parsing/compilation passes
+- ✓ Frame-based rendering
+- ✓ Temporary computations
+- ✗ Long-lived allocations
+- ✗ Frequent individual deallocations
+
+### 3.6 Block Header (16 bytes)
 
 ```c
 typedef struct sc_blk_header {
@@ -256,7 +537,7 @@ typedef struct sc_blk_header {
 } sc_blk_header;
 ```
 
-### 3.6 Block Footer (8 bytes)
+### 3.7 Block Footer (8 bytes)
 
 ```c
 typedef struct sc_blk_footer {
@@ -724,47 +1005,76 @@ node_idx rb_fixup_insert(node_idx) {
 - SlotArray wrapper struct
 - System metadata objects
 
-### 4.2 SLB0/Arena (Hybrid Bump + Free List)
+### 5.2 SLB0 (MTIS - Metadata-Tracked Indexed Slab)
 
-**Strategy:** Bump pointer with per-page free list reuse
+**Strategy:** B-tree indexed allocations with NodePool for metadata
 
 ```
 Page 0                    Page 1                    Page N
 ┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐
 │ Sentinel (32B)     │──▶│ Sentinel (32B)     │──▶│ Sentinel (32B)     │
-│ bump_offset ──────▶│   │ bump_offset ──────▶│   │ bump_offset ──────▶│
-│ free_list_head ───▶│   │ free_list_head ───▶│   │ free_list_head ───▶│
-│ alloc_count: N     │   │ alloc_count: M     │   │ alloc_count: K     │
 │ [allocated data]   │   │ [allocated data]   │   │ [allocated data]   │
-│ [free blocks]      │   │ [free blocks]      │   │ [free blocks]      │
+│ (tracked by btree) │   │ (tracked by btree) │   │ (tracked by btree) │
+│ (no free list)     │   │ (no free list)     │   │ (no free list)     │
 └────────────────────┘   └────────────────────┘   └────────────────────┘
-     4096 bytes               4096 bytes               4096 bytes
+     8192 bytes               8192 bytes               8192 bytes
 ```
 
 **Allocation Flow:**
-1. Enforce minimum size (`SLB0_MIN_ALLOC = 16`) and kAlign alignment
-2. Check free list (max 3 first-fit attempts)
-3. If found → remove from list, return pointer
-4. Else → bump allocate from current page
-5. If page exhausted → advance to next page, repeat
-6. Increment `alloc_count`
+1. Search B-tree for free node ≥ size (O(log n) with hints)
+2. If found → mark allocated, return address
+3. Else → bump allocate from current page
+4. If page exhausted → allocate new page via mmap
+5. Insert btree_node into B-tree (O(log n))
 
 **Dispose Flow:**
-1. Find owning page (address range check)
-2. Add block to page's free list (prepend)
-3. Decrement `alloc_count`
-4. If `alloc_count == 0` → release page via `munmap()`
+1. Search B-tree for node matching address
+2. Mark node as free (set NODE_FREE_FLAG)
+3. Coalesce with adjacent free nodes if possible
+4. Update max-free hints up the tree
 
-**Page Release:**
-- All pages eligible for release (including page-0)
-- Released pages unlinked from chain
-- `slab_slots[1]` updated if page-0 released
+**Use Cases:**
+- General-purpose heap allocations
+- Long-lived objects with individual deallocation
+- Mixed allocation/deallocation patterns
+
+### 5.3 Arenas (v0.2.2+)
+
+**Strategy:** Simple bump allocation with bulk disposal
+
+```
+Page 0                    Page 1                    Page N
+┌────────────────────┐   ┌────────────────────┐   ┌────────────────────┐
+│ Sentinel (32B)     │──▶│ Sentinel (32B)     │──▶│ Sentinel (32B)     │
+│ current_offset: 32 │   │ current_offset: 32 │   │ current_offset: 1280│
+│ [allocated data]   │   │ [allocated data]   │   │ [allocated data]   │
+│ (no metadata)      │   │ (no metadata)      │   │ (bump pointer)     │
+│ Footer (32B)       │   │ Footer (32B)       │   │ Footer (32B)       │
+└────────────────────┘   └────────────────────┘   └────────────────────┘
+     8192 bytes               8192 bytes               8192 bytes
+```
+
+**Allocation Flow:**
+1. Check if size fits in current page (current_offset + size ≤ 8128)
+2. If yes → allocate at current_offset, bump pointer
+3. If no → allocate new page via mmap, chain to pagelist
+4. Return pointer (O(1), no metadata)
+
+**Dispose Flow:**
+- **Individual disposal**: Not supported
+- **Arena disposal**: munmap all pages + NodePool (O(P) where P = page count)
+
+**Use Cases:**
+- Request/response processing
+- Parsing passes
+- Temporary computations
+- Scope-bound allocations
 
 ---
 
-## 5. Public API
+## 6. Public API
 
-### 5.1 Allocator Interface
+### 6.1 Allocator Interface
 
 ```c
 // Top-level (uses current scope from R7)
@@ -777,9 +1087,13 @@ Allocator.Scope.set(scope)   // Set current scope (updates R7)
 Allocator.Scope.config(scope, mask)  // Query policy/flags
 Allocator.Scope.alloc(scope, size)   // Allocate from explicit scope
 Allocator.Scope.dispose(scope, ptr)  // Dispose to explicit scope
+
+// Arena operations (v0.2.2+)
+Allocator.create_arena(name, policy)   // Create user arena (scope_id 2-15)
+Allocator.dispose_arena(scope)         // Dispose entire arena + all pages
 ```
 
-### 5.2 Memory Interface (Internal)
+### 6.2 Memory Interface (Internal)
 
 ```c
 Memory.sys0_size()           // Returns 4096
@@ -790,9 +1104,13 @@ Memory.get_sys0_base()       // R0 value (SYS0 base address)
 Memory.get_slots_base()      // Slab slots array start
 Memory.get_slots_end()       // Slab slots array end
 Memory.SlabManager->...      // Slab slot operations
+
+// Arena operations (v0.2.2+)
+Memory.arena_create_impl(name, policy)   // Internal arena creation
+Memory.arena_dispose_impl(scope)         // Internal arena disposal
 ```
 
-### 5.3 SlabManager Interface (Internal)
+### 6.3 SlabManager Interface (Internal)
 
 ```c
 SlabManager.init_slab_array()           // Initialize slotarray wrapper
@@ -805,27 +1123,7 @@ SlabManager.set_slab_slot(index, addr)  // Set page-0 address (uses PArray.set)
 
 ---
 
-## 6. Scope Policies & Flags
-
-### 6.1 Policies (Immutable)
-
-| Policy | Value | Description |
-|--------|-------|-------------|
-| `SCOPE_POLICY_RECLAIMING` | 0 | SYS0 only; first-fit with block reuse |
-| `SCOPE_POLICY_DYNAMIC` | 1 | Auto-grows by chaining pages |
-| `SCOPE_POLICY_FIXED` | 2 | Pre-allocated; NULL when exhausted |
-
-### 6.2 Flags (Mutable)
-
-| Flag | Bit | Description |
-|------|-----|-------------|
-| `SCOPE_FLAG_PROTECTED` | 0x01 | Blocks destroy/reset |
-| `SCOPE_FLAG_PINNED` | 0x02 | Blocks set_current and frame ops |
-| `SCOPE_FLAG_SECURE` | 0x04 | Blocks cross-scope move/copy |
-
----
-
-## 7. State Flags
+## 7. Memory States
 
 ```c
 enum {
@@ -839,7 +1137,30 @@ enum {
 
 ---
 
-## 8. Initialization Sequence
+## 8. Scope Policies & Flags
+
+### 8.1 Policies (Immutable)
+
+| Policy | Value | Description |
+|--------|-------|-------------|
+| `SCOPE_POLICY_RECLAIMING` | 0 | SYS0 only; first-fit with block reuse |
+| `SCOPE_POLICY_DYNAMIC` | 1 | Auto-grows by chaining pages and NodePool |
+| `SCOPE_POLICY_FIXED` | 2 | Pre-allocated; NULL when exhausted |
+
+**Notes:**
+- v0.2.2+: DYNAMIC applies to SLB0 and user arenas
+- NodePool growth: 8KB → 16KB → 32KB (doubles via mremap)
+- Page allocation: 8KB per page via mmap
+
+### 8.2 Flags (Mutable)|
+| `SCOPE_FLAG_SECURE` | 0x04 | Blocks cross-scope move/copy |
+
+**Notes:**
+- v0.2.2+: Frame operations removed, PINNED blocks scope switching only
+
+---
+
+## 9. Initialization Sequence
 
 ```
 1. Verify SYS0_PAGE_SIZE is power-of-2
@@ -854,25 +1175,19 @@ enum {
 10. Initialize SlabManager (slab_slots wrapper)
 
 11. Initialize scope_table[1] for SLB0
-12. Allocate 16 pages via mmap (64KB)
-13. Initialize page sentinels and link chain
-14. Set slab_slots[1] = SLB0 page-0 address
-15. Set R7 = &scope_table[1] (SLB0 is current)
-#endif
+12. Allocate SLB0 NodePool via mmap (8KB initial)
+13. Allocate 16 pages via mmap (128KB total)
+14. Initialize page sentinels and link chain
+15. Set slab_slots[1] = SLB0 page-0 address
+16. Initialize SLB0 B-tree root
+17. Set R7 = &scope_table[1] (SLB0 is current)
 
-~~#ifndef TEST_BOOTSTRAP_ONLY~~
-~~11. Initialize scope_table[1] for SLB0~~
-~~12. Allocate 16 pages via mmap (64KB)~~
-~~13. Initialize page sentinels and link chain~~
-~~14. Set slab_slots[1] = SLB0 page-0 address~~
-~~15. Set R7 = &scope_table[1] (SLB0 is current)~~
-~~#endif~~
-*The TEST_BOOTSTRAP_ONLY conditional is no longer present; SLB0/user memory system is always initialized.*
+v0.2.2+: User arenas created on-demand via create_arena()
 ```
 
 ---
 
-## 9. Dispatch Mechanism
+## 10. Dispatch Mechanism
 
 Allocation dispatch uses `scope_id` switch instead of function pointers:
 
@@ -880,50 +1195,75 @@ Allocation dispatch uses `scope_id` switch instead of function pointers:
 object memory_alloc(usize size) {
     scope current = memory_get_current_scope();
     switch (current->scope_id) {
-        case 0:  return sys0_alloc(size);   // SYS0
-        case 1:  return slb0_alloc(size);   // SLB0
-        default: /* user arena */ break;
+        case 0:  return sys0_alloc(size);     // SYS0 (reclaiming)
+        case 1:  return slb0_alloc(size);     // SLB0 (MTIS)
+        default: return arena_alloc(current, size);  // User arena (bump)
     }
 }
 ```
 
 **Benefits:**
-- Smaller scope struct (64 bytes vs ~120)
+- Smaller scope struct (~200 bytes vs ~300)
 - No function pointer indirection
 - Compile-time optimization potential
 - Simpler initialization
+- Clear dispatch path for arenas (v0.2.2+)
 
 ---
 
-## 10. Files Reference
+## 11. Files Reference
 
 | File | Purpose |
 |------|---------|
 | `include/memory.h` | Public API (Allocator interface) |
 | `include/internal/memory.h` | Internal structures and Memory interface |
-| `include/internal/slab_manager.h` | SlabManager interface |
-| `src/memory.c` | Implementation (allocation, init) |
+| `include/internal/slab_manager.h` | SlabManager interface (deprecated) |
+| `include/internal/node_pool.h` | NodePool interface (v0.2.2+) |
+| `src/memory.c` | Implementation (allocation, init, arenas) |
 | `src/slab_manager.c` | Slab slot array management |
-| `test/test_bootstrap.c` | SYS0 bootstrap tests (10 tests) |
-| `test/test_slab0.c` | SLB0 tests (20 tests) |
+| `src/node_pool.c` | NodePool growth implementation (v0.2.2+) |
+| `test/unit/test_bootstrap.c` | SYS0 bootstrap tests (10 tests) |
+| `test/unit/test_btree_page.c` | B-tree/page tests (20+ tests) |
+| `test/unit/test_arena_*.c` | Arena lifecycle/disposal/allocation (15 tests) |
+| `test/validation/test_nodepool_growth_validation.c` | NodePool growth (5 tests) |
+| `test/integration/test_arena_integration.c` | Arena integration (5 tests) |
 
 ---
 
-## 11. Test Coverage
+## 12. Test Coverage (v0.2.2)
 
-### Bootstrap Tests (SYS0)
-1. Memory state ready
-2. SYS0 size is 4KB
-3. Page alignment (kAlign)
-4. Header alignment
-5. Footer alignment
-6. Footer magic marker
-7. First block offset = 256
-8. Last footer offset = 4088
-9. Initial block is FREE | LAST | FOOT
-10. Slab slot allocation
+### NodePool Growth Tests (Days 1-3: 11 tests)
+**Unit Tests (6):**
+1. page_node growth: initial → 8KB growth
+2. page_node growth: verify data intact
+3. page_node growth: multiple growth cycles
+4. btree_node growth: initial → 8KB growth
+5. btree_node growth: verify relocation
+6. btree_node growth: multiple growth cycles
 
-### SLB0 Tests (20 total)
+**Validation Tests (5):**
+1. Growth trigger detection (page_node collision)
+2. Growth trigger detection (btree_node collision)
+3. Data integrity across growth
+4. Base address relocation handling
+5. Capacity doubling verification
+
+### Arena Lifecycle Tests (Days 4-7: 20 tests)
+**Lifecycle (5):**
+1. Create arena with valid name/policy
+2. Arena initialization (scope_id, NodePool, page)
+3. Arena slot allocation (2-15)
+4. Arena naming and policy
+5. Arena creation failure (exhausted slots)
+
+**Disposal (5):**
+1. Dispose arena unmaps pages
+2. Dispose arena unmaps NodePool
+3. Dispose arena clears scope entry
+4. Dispose arena frees slot for reuse
+5. Dispose arena with multiple pages
+
+**Allocation (5):
 
 **Initialization (10):**
 1. Scope exists (scope_id = 1)
@@ -951,18 +1291,120 @@ object memory_alloc(usize size) {
 19. Large allocation
 20. Page release on empty
 
+### Arena System Tests (v0.2.2: 31 tests)
+
+**NodePool Growth (Days 1-3: 11 tests)**
+- Unit: page_node/btree_node growth (6 tests)
+- Validation: triggers, integrity, relocation (5 tests)
+
+**Arena Lifecycle (Day 4: 5 tests)**
+1. Create arena with valid name/policy
+2. Arena initialization (scope_id, NodePool, page)
+3. Arena slot allocation (2-15)
+4. Arena naming and policy
+5. Arena creation failure (exhausted slots)
+
+**Arena Disposal (Day 5: 5 tests)**
+1. Dispose arena unmaps pages
+2. Dispose arena unmaps NodePool
+3. Dispose arena clears scope entry
+4. Dispose arena frees slot for reuse
+5. Dispose arena with multiple pages
+
+**Arena Allocation (Day 6: 5 tests)**
+1. Allocate from arena (bump allocation)
+2. Multiple allocations within page
+3. Large allocation spanning pages
+4. Allocation triggers new page
+5. Page chaining verification
+
+**Arena Integration (Day 7: 5 tests)**
+1. Arena exhaustion and recovery (14 arena limit)
+2. Mixed SLB0/arena allocations
+3. Large allocation stress (64KB)
+4. Rapid create-dispose cycles (100x)
+5. Concurrent operations (10 arenas, 200 allocations)
+
+**Totals:**
+- **31 arena system tests** (v0.2.2 Phase 1 Week 1)
+- **All tests passing, 0 bytes leaked** (valgrind validated)
+
 ---
 
-## 12. Future Work
+## 13. Version History
 
-**Completed:**
-- [x] Implement `slb0_alloc()` with free list + bump allocation
-- [x] Implement `slb0_dispose()` with page-level tracking and release
+### v0.2.2-arenas (March 2026)
+**Arena System + Dynamic NodePool Growth**
+- ✅ User arenas: 14 concurrent scopes (slots 2-15)
+- ✅ Simple bump allocation: O(1), no metadata overhead
+- ✅ NodePool dynamic growth: 8KB→16KB→32KB via mremap
+- ✅ Arena API: create_arena(), dispose_arena()
+- ✅ Bulk disposal: munmap all pages + NodePool
+- ✅ 31 tests across 7 test files
+- Removed: Frame API (deprecated in favor of arenas)
+
+### v0.2.1-frames (Prior)
+**Frame-based Scoped Allocations**
+- Chunked bump allocators (4KB chunks)
+- LIFO frame stack (16 levels max)
+- Frame API: frame_begin(), frame_end()
+- Status: Deprecated, replaced by arenas in v0.2.2
+
+### v0.2.0 (Prior)
+**MTIS (Metadata-Tracked Indexed Slab)**
+- B-tree indexed allocations
+- Max-free hints for O(log n) search
+- NodePool for btree_node storage
+- SLB0 scope with DYNAMIC policy
+
+### v0.1.0 (Initial)
+**SYS0 Bootstrap**
+- 4KB system page
+- First-fit allocation
+- Block headers/footers
+- Basic scope infrastructure
+
+---
+
+## 14. Performance Characteristics (v0.2.2)
+
+| Operation | SYS0 | SLB0 (MTIS) | Arena |
+|-----------|------|-------------|-------|
+| Allocation | O(n) first-fit | O(log n) B-tree | **O(1) bump** |
+| Deallocation | O(n) | O(log n) | N/A (bulk only) |
+| Memory overhead | 24 bytes/block | 24 bytes/alloc | **0 bytes** |
+| Fragmentation | Reusable blocks | B-tree coalescing | **None** |
+| Use case | System metadata | General heap | **Scope-bound** |
+
+**Arena Advantages:**
+- ✓ Fastest allocation (bump pointer)
+- ✓ No per-allocation metadata
+- ✓ Zero fragmentation
+- ✓ O(1) bulk disposal
+- ✓ Predictable performance
+
+**Arena Trade-offs:**
+- ✗ No individual deallocation
+- ✗ Limited to 14 concurrent arenas
+- ✗ Memory held until disposal
+
+---
+
+## 15. Future Work
+
+**Completed in v0.2.2:**
+- [x] Arena.create_arena/dispose_arena for user scopes (indices 2-15)
+- [x] NodePool dynamic growth via mremap
+- [x] Simple bump allocation with page chaining
+- [x] Bulk disposal for arenas
+- [x] Integration tests for exhaustion/recovery
 
 **Pending:**
-- [ ] Store allocation size for accurate free list sizing
-- [ ] Arena.create/destroy for user scopes (indices 2-15)
-- [ ] Frame checkpoint (begin/end) for bulk deallocation
+- [ ] Thread-safety for arenas (mutex per scope)
+- [ ] Arena policy extensions (pre-allocate N pages)
+- [ ] Memory pressure signals (warn on high usage)
 - [ ] sys0_dispose() block coalescing
 - [ ] Cross-scope move/copy with SECURE flag enforcement
-- [ ] DYNAMIC policy: allocate new pages when chain exhausted
+- [ ] Red-Black tree balancing for SLB0 B-tree (Phase 7)
+
+---

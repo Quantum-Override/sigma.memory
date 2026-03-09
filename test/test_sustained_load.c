@@ -1,1 +1,0 @@
-stress/test_sustained_load.c

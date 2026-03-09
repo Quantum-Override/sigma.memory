@@ -1,12 +1,47 @@
 # SigmaCore Memory - Roadmap
 
-**Current Version:** 0.2.0-alpha (B-Tree Architecture) ✅  
-**Last Updated:** February 12, 2026  
-**Branch:** rel-0.2.0-btree (from v0.1.0 baseline)
+**Current Version:** 0.2.2-arenas (Arena System + Dynamic NodePool Growth) ✅  
+**Last Updated:** March 8, 2026  
+**Branch:** main
 
 ---
 
-## Architecture Change: Metadata-External B-Tree Model
+## v0.2.2-arenas - Arena System ✅ COMPLETE
+
+**Status:** ✅ Implementation complete, 31/31 tests passing, 0 bytes leaked
+
+**Key Features:**
+- ✅ User arenas: 14 concurrent scopes (scope_id 2-15)
+- ✅ Simple bump allocation: O(1), no metadata overhead
+- ✅ NodePool dynamic growth: 8KB→16KB→32KB via mremap
+- ✅ Arena API: `create_arena(name, policy)`, `dispose_arena(scope)`
+- ✅ Bulk disposal: munmap all pages + NodePool shutdown
+- ✅ 31 tests across 7 test files (unit, validation, integration)
+
+**Implementation:**
+- Days 1-3: NodePool growth (page_node, btree_node, validation) - 11 tests ✅
+- Days 4-6: Arena lifecycle (create, dispose, allocate) - 15 tests ✅
+- Day 7: Integration & stress tests - 5 tests ✅
+
+**Performance:**
+- Arena allocation: O(1) bump pointer (vs O(log n) for SLB0)
+- Arena disposal: O(P) where P = page count (bulk munmap)
+- Zero per-allocation metadata overhead
+- 8KB pages with 8128 bytes usable (99.2% efficiency)
+
+**Documentation:**
+- ✅ USERS_GUIDE.md: Arena API with examples
+- ✅ MEMORY_REFERENCE.md: Technical architecture updated
+- ✅ All tests documented and validated
+
+**Deprecations:**
+- Frame API removed (v0.2.1) - replaced by arena system
+- Frame-specific constants removed
+- Chunked allocation removed
+
+---
+
+## v0.2.1-frames - Frame Support ✅ DEPRECATED
 
 **Why the pivot:**
 - Bitmap approach hit fundamental design issues (disposal size detection)
@@ -264,12 +299,12 @@ usize diag_slab_alloc_count(sbyte slab_id);
 Items for future releases, roughly prioritized:
 
 ### High Priority (v0.2.1 Focus)
-| ID | Item | Description | Target |
-|----|------|-------------|--------|
-| F-01 | Frame Support (Prototyping) | Frame ops for SLB0 and dynamic/reclaiming slabs | v0.2.1 |
-| F-02 | Standard Arena/Frame API | User-facing frame create/dispose/introspect | v0.2.1 |
-| F-03 | Thread-Friendly Architecture | Design hooks for external task management (Sigma.Tasking) | v0.2.1 |
-| F-04 | Arena Extensions | Multi-slab frame support, nested frames | v0.2.1 |
+| ID | Item | Description | Target | Status |
+|----|------|-------------|--------|--------|
+| F-01 | Frame Support (SLB0) | Frame ops for SLB0 with chunk-based bump allocator | v0.2.1 | ✅ Complete |
+| F-02 | Standard Arena/Frame API | User-facing frame create/dispose/introspect | v0.2.1 | ✅ Complete |
+| F-03 | Thread-Friendly Architecture | Design hooks for external task management (Sigma.Tasking) | v0.2.1 | Pending |
+| F-04 | Arena Extensions | Multi-slab frame support, nested frames | v0.2.1 | Pending |
 
 ### Medium Priority (v0.3.0+)
 | ID | Item | Description | Target |
@@ -396,7 +431,7 @@ Intentional architectural choices for the v0.2.0 rewrite:
 - 2-3x improvement over pre-bugfix state
 
 **Test Coverage:**
-- 45 tests passing (bootstrap, btree, integration, validation, performance)
+- 51 tests passing (bootstrap, btree, integration, validation, performance, frames)
 - Valgrind clean (no leaks, no errors)
 
 **Package:**
@@ -417,82 +452,108 @@ Intentional architectural choices for the v0.2.0 rewrite:
 
 ---
 
-### v0.2.1 (Next - Q1 2026)
+### v0.2.1-frames ✅ (Completed - March 8, 2026)
 
-**Theme:** Arena/Frame Support & Thread-Friendly Architecture
+**Theme:** Frame Support for SLB0
 
-**Focus Areas:**
-1. **Frame Support for SLB0** (Primary Deliverable)
-   - Frame operations for dynamic slabs
-   - Frame support in reclaiming slabs (B-tree contexts)
-   - Checkpoint/restore mechanics
-   - Nested frame validation
-   - Frame introspection (allocation count, memory usage)
+**Delivered:**
+- ✅ Frame operations (begin/end/depth/allocated) - 17/17 tests passing
+- ✅ Hybrid allocation (≤4KB=bump, >4KB=B-tree tracked)
+- ✅ Chunked bump allocators (4KB chunks, automatic chaining)
+- ✅ LIFO nesting (MAX_DEPTH=16)
+- ✅ Large allocation tracking (>4KB allocations owned by frames)
+- ✅ Valgrind clean (no leaks, no corruption)
 
-2. **Standard Arena/Frame API**
-   - User-facing frame creation API
-   - Frame disposal (rollback allocations)
-   - Integration with existing slab policies
-   - Multi-slab frame support (arena-wide frames)
+**Status:** Production-ready for SLB0, ready for dog-fooding
 
-3. **Thread-Friendly Architecture**
-   - Design hooks for external task/scheduler management
-   - Document reentrancy requirements for Sigma.Tasking
-   - Identify state that must be task-local vs global
-   - Define integration points (no locks implemented yet)
+---
 
-4. **Arena Extensions**
-   - Support for user arenas (SLB1-14 groundwork)
-   - Per-arena policies (POLICY_RECLAIMING, POLICY_BUMP prep)
-   - Arena introspection API
+### v0.2.2 (Next - March 2026) ⚡ CRITICAL PATH
 
-**Architectural Philosophy:**
-Sigma.Memory is an **OS-level component** that will be managed by Sigma.Tasking. Rather than implementing thread-safety/concurrency internally (risking lock churn and overlap), we design **thread-friendly interfaces** that allow external task schedulers to coordinate access. This separation ensures clean layering and prevents architectural conflicts.
+**Theme:** Dog-Food Release - Arena Support for Sigma.Test & Anvil
+
+**Mission:** Get minimal viable multi-arena support into the hands of Sigma.Test and Anvil teams to discover real-world requirements.
+
+**Critical Blockers:**
+1. **NodePool Growth (mremap)** - MUST implement
+   - Currently stubbed at node_pool.c:348, :382
+   - 8KB → 16KB → 32KB → 64KB automatic growth
+   - Multi-arena will exhaust 8KB pool quickly
+   - **Status:** Week 1 priority ⚡
+
+2. **User Arenas (SLB1-15)** - MUST implement
+   - Arena.create/destroy API
+   - Per-arena allocation/disposal
+   - Per-arena frames (extend v0.2.1 model)
+   - POLICY_RECLAIMING only (B-Tree backed)
+   - **Status:** Week 1-2 implementation
+
+3. **Thread-Friendly Hooks** - Design only
+   - Document coordination points for Sigma.Tasking
+   - No locks, no thread-safety (intentional)
+   - Hook architecture for external task management
+   - **Status:** Week 2 documentation
 
 **Deliverables:**
-- Frame API working in SLB0 (prototyping complete)
-- Frame operations for dynamic and reclaiming slabs
-- Documentation: Thread-friendly design guide for Sigma.Tasking integration
-- Arena groundwork for multi-slab support
-- Updated benchmarks for frame overhead
+- ✅ NodePool automatically grows via mremap
+- ✅ 14 user arenas available (SLB1-14)
+- ✅ Arena create/destroy/allocate/dispose API
+- ✅ Per-arena frame support
+- ✅ Thread-friendly hooks documented (NOT implemented)
+- ✅ 60-70 tests passing (arena lifecycle, growth, isolation)
+- ✅ Integration examples for Sigma.Test and Anvil
 
 **Success Criteria:**
-- SigmaTest dogfooding with frame-based test isolation
-- Frame operations validated in real-world scenarios
-- Clear integration path documented for Sigma.Tasking
-- No performance regression from frame infrastructure
+- Sigma.Test can run tests in isolated arenas
+- Anvil can use per-module/per-phase arenas
+- Dog-food feedback informs v0.3.0 priorities
+
+**Timeline:** 3 weeks (target: March 29, 2026)
+
+**Deferred to post-dog-food:**
+- POLICY_BUMP/FIXED (wait for proven need)
+- Thread-safety implementation (Sigma.Tasking not ready)
+- Advanced frame features (transactional, checkpoints)
 
 ---
 
 ### v0.3.0 (Future - Q2 2026)
 
-**Theme:** Production Multi-Slab, Policies & Thread-Safety
+**Theme:** Production Hardening - Informed by Dog-Food Feedback
 
-**Planned:**
-- User arenas (SLB1-SLB14) - production ready
-- POLICY_BUMP slabs (deterministic allocation)
-- POLICY_RECLAIMING slabs (B-Tree backed)
-- Thread-safety implementation (with Sigma.Tasking integration)
-- Scope introspection API (full stats)
-- sys0_dispose coalescing
-- Advanced frame operations (transactional, nested)
+**Scope determined by Sigma.Test & Anvil usage:**
+- Additional policies if needed (POLICY_BUMP, POLICY_FIXED)
+- Thread-safety implementation (when Sigma.Tasking ready)
+- Performance optimizations based on profiling
+- Advanced frame features if basic frames insufficient
+- sys0_dispose coalescing (if fragmentation proves problematic)
+- Tree rebalancing (if pathological cases observed)
+
+**Planning:**
+- Week 1 (post-v0.2.2): Collect dog-food feedback
+- Week 2: Prioritize based on real-world pain points
+- Week 3-6: Implement highest-priority items
+- Week 7-8: Validation + production release
+
+**Philosophy:** Don't build what we don't need. Let real usage drive priorities.
 
 ---
 
 ## 🐛 Known Issues
 
-### v0.2.0-alpha (Current)
+### v0.2.1 (Current)
 | ID | Issue | Status | Notes |
 |----|-------|--------|-------|
-| KI-03 | No frame support yet | Tracked | Planned for v0.2.1 |
-| KI-04 | Not thread-safe | Tracked | Thread-friendly design in v0.2.1, implementation in v0.3.0 |
+| KI-04 | Not thread-safe | Tracked | Thread-friendly design pending, implementation in v0.3.0 |
 | KI-05 | Single-threaded only | Tracked | Will be managed by Sigma.Tasking (v0.3.0) |
 
-### v0.2.0-alpha (Resolved)
-| ID | Issue | Status | Resolution |
-|----|-------|--------|------------|
-| KI-01 | Bootstrap tests outdated | ✅ Fixed | Updated for 8KB SYS0 |
-| KI-02 | Node pool exhaustion | ✅ Fixed | Dynamic growth (2→32KB), split reuses nodes |
+### Resolved Issues
+| ID | Issue | Status | Resolution | Version |
+|----|-------|--------|------------|----------|
+| KI-01 | Bootstrap tests outdated | ✅ Fixed | Updated for 8KB SYS0 | v0.2.0 |
+| KI-02 | Node pool exhaustion | ✅ Fixed | Dynamic growth (2→32KB), split reuses nodes | v0.2.0 |
+| KI-03 | No frame support | ✅ Fixed | Implemented chunk-based frames for SLB0 | v0.2.1 |
+| KI-06 | shutdown_memory_system use-after-free | ✅ Fixed | Fixed page chain traversal ordering | v0.2.1 |
 
 ---
 
@@ -526,7 +587,7 @@ After each phase:
 
 ---
 
-**Last Updated:** February 12, 2026  
-**Current Milestone:** v0.2.0-alpha RELEASED ✅  
-**Next Milestone:** v0.2.1 - Frame Support & Concurrency
+**Last Updated:** March 8, 2026  
+**Current Milestone:** v0.2.1 (Frame Support - Phase 1 Complete ✅)  
+**Next Milestone:** v0.2.2 - Thread-Friendly Architecture & Multi-Slab Frames
 

@@ -30,6 +30,7 @@
 #include "config.h"
 // ----------------
 #include <sigma.core/types.h>
+#include <stdint.h>  // Explicit include for uint32_t, etc.
 
 // layout constants
 #define kAlign 16                                     // 16-byte alignment
@@ -120,22 +121,43 @@ typedef struct sc_node {
     // Bits 0-7:   log2(max_free_size) - represents 2^0 to 2^255 bytes
     // Bit 8:      direction (0=left, 1=right subtree has max)
     // Bit 9:      FREE_FLAG - this node represents a free block
-    // Bits 10-15: reserved for future use
+    // Bit 10:     FRAME_NODE_FLAG - this node is a frame chunk
+    // Bits 11-15: reserved for future use
     uint16_t info;  // 2: allocation info and flags
 
-    uint8_t _reserved[6];  // 6: reserved for frame extensions, timestamps, etc.
-} sc_node;                 // Total: 24 bytes - cache-line friendly (3 nodes per 64B line)
+    // _reserved[6] used for frame extensions:
+    // - FRAME_NODE_FLAG: frame_data.{frame_offset, next_chunk_idx, frame_id}
+    // - FRAME_LARGE_FLAG: first 2 bytes = next_large_alloc_idx (linked list)
+    union {
+        struct {
+            uint16_t frame_offset;    // 2: current bump position in chunk (frame use)
+            uint16_t next_chunk_idx;  // 2: next chunk in chain (frame use)
+            uint16_t frame_id;        // 2: frame identifier
+        } frame_data;
+        struct {
+            uint16_t next_large_alloc;  // 2: next large allocation in frame (FRAME_LARGE_FLAG)
+            uint8_t _pad[4];            // 4: unused
+        } large_alloc_data;
+        uint8_t _reserved[6];  // 6: raw reserved space
+    };
+} sc_node;  // Total: 24 bytes - cache-line friendly (3 nodes per 64B line)
 typedef struct sc_node *btree_node;
 
 // Bit masks for info field
-#define NODE_SIZE_MASK 0x00FF       // Bits 0-7: log2 size
-#define NODE_DIRECTION_BIT 0x0100   // Bit 8: direction
-#define NODE_FREE_FLAG 0x0200       // Bit 9: free flag
-#define NODE_RESERVED_MASK 0xFC00   // Bits 10-15: reserved
+#define NODE_SIZE_MASK 0x00FF      // Bits 0-7: log2 size
+#define NODE_DIRECTION_BIT 0x0100  // Bit 8: direction
+#define NODE_FREE_FLAG 0x0200      // Bit 9: free flag
+#define FRAME_NODE_FLAG 0x0400     // Bit 10: frame chunk flag (bump allocated)
+#define FRAME_LARGE_FLAG 0x0800    // Bit 11: frame large allocation (>4KB, B-tree allocated)
+#define NODE_RESERVED_MASK 0xF000  // Bits 12-15: reserved
 
 // Skip list constants
 #define SKIP_LIST_MAX_LEVEL 4  // 4 levels (0-3) - sufficient for 256+ pages
 #define SKIP_LIST_P 0.5        // 50% probability for level promotion
+
+// Frame constants
+#define FRAME_CHUNK_SIZE 4096  // 4KB chunks for frame allocations
+#define MAX_FRAME_DEPTH 16     // Maximum nesting depth for frames
 
 // NodePool header structure (40 bytes) - Phase 7 two-tier architecture
 // Initial size: 2KB (small start, grows dynamically via mremap)
@@ -170,16 +192,16 @@ enum {
 };
 // Block header/footer structures
 typedef struct sc_blk_header {
-    uint next_off;  // Offset from sys_page base to next header
-    uint size;      // Usable size of the payload block in bytes
-    sbyte flags;    // Bitfield: FREE, LAST, HAS_FOOTER, reserved
-    sbyte _pad[7];  // Padding for alignment
-} sc_blk_header;    // size 16 bytes
+    uint32_t next_off;  // Offset from sys_page base to next header
+    uint32_t size;      // Usable size of the payload block in bytes
+    sbyte flags;        // Bitfield: FREE, LAST, HAS_FOOTER, reserved
+    sbyte _pad[7];      // Padding for alignment
+} sc_blk_header;        // size 16 bytes
 typedef struct sc_blk_header *block_header;
 typedef struct sc_blk_footer {
-    uint magic;   // #DEADC0DE marker
-    uint size;    // Copy of the header.size for backward traversal
-} sc_blk_footer;  // size 8 bytes
+    uint32_t magic;  // #DEADC0DE marker
+    uint32_t size;   // Copy of the header.size for backward traversal
+} sc_blk_footer;     // size 8 bytes
 typedef struct sc_blk_footer *block_footer;
 #endif
 
@@ -212,7 +234,16 @@ typedef struct sc_page_sentinel *page_sentinel;
 // Forward declaration for scope pointer
 typedef struct sc_scope *scope;
 
-// Unified scope table entry (64 bytes - fits 16 entries in 1KB)
+// Frame state structure for nesting support
+typedef struct sc_frame_state {
+    uint16_t frame_id;           // Frame identifier
+    uint16_t head_chunk_idx;     // First chunk in chain (bump allocated)
+    uint16_t large_allocs_head;  // First large allocation (>4KB, B-tree allocated)
+    uint16_t _pad;               // Alignment padding
+    uint32_t total_allocated;    // Bytes allocated in frame
+} sc_frame_state;
+
+// Unified scope table entry (64 bytes base + frame extensions)
 // Layout: scope_table[0]=SYS0, scope_table[1]=SLB0, [2-15]=user arenas
 // The slab_table[i] array parallels scope_table[i] with page-0 addresses
 typedef struct sc_scope {
@@ -225,7 +256,15 @@ typedef struct sc_scope {
     usize page_count;       // 8: Number of pages in chain
     char name[16];          // 16: Inline scope name (null-terminated)
     addr nodepool_base;     // 8: Base address of per-scope NodePool mmap
-} sc_scope;                 // Total: 64 bytes
+
+    // Frame support (extends beyond 64 bytes - acceptable for v0.2.1)
+    uint16_t current_frame_idx;                   // Active frame_node (NODE_NULL if none)
+    uint16_t current_chunk_idx;                   // Current chunk being allocated from
+    uint16_t frame_counter;                       // Unique frame_id generator
+    uint8_t frame_depth;                          // Current nesting level (0-16)
+    uint8_t _frame_pad;                           // Alignment padding
+    sc_frame_state frame_stack[MAX_FRAME_DEPTH];  // LIFO nesting stack (16 * 8 = 128 bytes)
+} sc_scope;  // Total: 64 + 8 + 128 = 200 bytes (with frame support)
 #endif
 
 #if 1  // Region: Internal Memory Interface
@@ -243,6 +282,7 @@ typedef struct sc_memory_i {
     const struct sc_slab_manager_i *SlabManager;
     addr (*get_slots_base)(void);
     addr (*get_slots_end)(void);
+    scope (*get_scope)(usize index);  // For testing: access scope table
 } sc_memory_i;
 extern const sc_memory_i Memory;
 #endif

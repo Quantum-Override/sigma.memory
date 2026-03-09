@@ -1,0 +1,21 @@
+[2] Memory: Frame Support     :   17 : 2026-03-08  15:18:58                     
+================================================================================
+Running: Frame: begin returns handle                            10.257 ms [PASS]
+Running: Frame: single allocation                                6.265 ms [PASS]
+Running: Frame: end deallocates all                              5.404 ms [PASS]
+Running: Frame: empty frame                                      5.661 ms [PASS]
+Running: Frame: max depth limit                                 58.301 ms [PASS]
+Running: Frame: depth tracking                                   9.236 ms [PASS]
+Running: Frame: single chunk overflow                            5.992 ms [PASS]
+Running: Frame: multiple chunks                                  9.111 ms [PASS]
+Running: Frame: large single allocation                          2.971 ms [PASS]
+Running: Frame: boundary allocations                             5.584 ms [PASS]
+Running: Frame: deep nesting with allocations                   26.151 ms [PASS]
+Running: Frame: mixed normal and frame allocations              11.191 ms [PASS]
+Running: Frame: allocation isolation                             8.100 ms [PASS]
+Running: Frame: stress many small allocations                    9.375 ms [PASS]
+Running: Frame: zero-size allocation                             1.760 ms [PASS]
+Running: Frame: very large allocation                            2.953 ms [PASS]
+Running: Frame: alternating sizes                                9.223 ms [PASS]
+================================================================================
+[2]     TESTS= 17        PASS= 17        FAIL=  0        SKIP=  0

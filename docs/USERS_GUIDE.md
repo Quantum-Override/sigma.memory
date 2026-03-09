@@ -1,17 +1,18 @@
 # SigmaCore Memory - User's Guide
 
-**Version:** 0.2.0-alpha  
-**Date:** February 12, 2026
+**Version:** 0.2.2-arenas  
+**Date:** March 8, 2026
 
 ---
 
 ## Overview
 
-`sigma.memory` is a lightweight C memory allocator library with scope-based allocation and B-tree external metadata. It provides:
+`sigma.memory` is a lightweight C memory allocator library with scope-based allocation and user-defined arenas. It provides:
 
 - **Automatic initialization** via constructor (`__attribute__((constructor))`)
 - **Simple API** with `Allocator.alloc()` and `Allocator.dispose()`
-- **64KB user memory** (16 × 4KB pages) ready at startup
+- **User arenas** for isolated allocation domains (up to 14 concurrent arenas)
+- **Frame-based bulk deallocation** for temporary allocations
 - **Zero configuration** required for basic use
 
 ---
@@ -25,7 +26,7 @@
 
 ### Dependencies
 - `sigma.core` (types.h)
-- `sigma.collections` (parray, slotarray)
+- `sigma.test` (for test execution)
 
 ---
 
@@ -137,6 +138,87 @@ void show_scope_info(void) {
 
 ---
 
+## Frame API (v0.2.1+)
+
+Frames provide arena-style bulk deallocation for temporary allocations. Perfect for testing, temporary buffers, and phase-based computation.
+
+### Frame Operations
+
+| Function | Description |
+|----------|-------------|
+| `Allocator.frame_begin()` | Create new frame, returns opaque handle |
+| `Allocator.frame_end(frame)` | Deallocate all frame allocations |
+| `Allocator.frame_depth()` | Current frame nesting depth (0-16) |
+| `Allocator.frame_allocated(frame)` | Bytes allocated in frame |
+
+### Example: Frame-Based Testing
+
+```c
+#include <sigma.memory/memory.h>
+
+void test_with_frames(void) {
+    // Create frame for temporary allocations
+    frame f = Allocator.frame_begin();
+    if (!f) {
+        // Max nesting depth (16) reached
+        return;
+    }
+    
+    // All allocations use frame's bump allocator (O(1))
+    object buffer1 = Allocator.alloc(128);
+    object buffer2 = Allocator.alloc(256);
+    object buffer3 = Allocator.alloc(512);
+    
+    // Use buffers for test operations...
+    
+    // Bulk deallocate everything (O(k) where k = chunk count)
+    Allocator.frame_end(f);
+    // buffer1, buffer2, buffer3 now invalid
+}
+```
+
+### Example: Nested Frames
+
+```c
+void nested_frames(void) {
+    frame outer = Allocator.frame_begin();
+    
+    object a = Allocator.alloc(64);  // From outer frame
+    
+    frame inner = Allocator.frame_begin();
+    object b = Allocator.alloc(128); // From inner frame
+    
+    // Check nesting
+    usize depth = Allocator.frame_depth();  // Returns 2
+    
+    // End inner frame first (LIFO ordering)
+    Allocator.frame_end(inner);  // Deallocates b
+    
+    object c = Allocator.alloc(32);  // Still in outer frame
+    
+    Allocator.frame_end(outer);  // Deallocates a, c
+}
+```
+
+### Frame Characteristics
+
+| Property | Value | Notes |
+|----------|-------|-------|
+| Chunk size | 4 KB | Automatic chaining when full |
+| Max nesting | 16 levels | LIFO stack limit |
+| Allocation speed | O(1) | Bump pointer, no search |
+| Deallocation speed | O(k) | k = number of 4KB chunks |
+| Overhead | 24 bytes | Per chunk (sc_node) |
+
+### Frame Limitations
+
+- **LIFO ordering required**: Must end inner frames before outer
+- **No partial deallocation**: frame_end() deallocates everything
+- **Chunk overhead**: Small allocations (< 4KB) waste no space, larger ones chain chunks
+- **Not thread-safe**: Single-threaded only (v0.2.1)
+
+---
+
 ## Scope Policies
 
 | Policy | Value | Description |
@@ -207,8 +289,128 @@ If you see ~2KB "still reachable" from sigtest framework, this is expected and n
 ## Version History
 
 | Version | Date | Changes |
-|---------|------|---------|
+|---------|------|------|
 | 0.1.0 | 2026-01-29 | Initial release: SYS0 bootstrap, SLB0 user allocator |
+| 0.2.0 | 2026-02-12 | B-tree external metadata, dynamic NodePool growth |
+| 0.2.1 | 2026-03-08 | Frame support (chunk-based bump allocator) |
+| **0.2.2** | **2026-03-08** | **User arenas (14 concurrent arenas, simple bump allocation)** |
+
+---
+
+## Arena API (v0.2.2+)
+
+User arenas provide isolated allocation domains with simple bump allocation. Perfect for subsystems, plugins, or temporary workspaces that need clean separation.
+
+### Arena Operations
+
+| Function | Description |
+|----------|-------------|
+| `Allocator.create_arena(name, policy)` | Create new arena, returns scope handle |
+| `Allocator.dispose_arena(scope)` | Dispose entire arena and all allocations |
+| `Allocator.Scope.alloc(scope, size)` | Allocate from specific arena |
+
+### Example: Basic Arena Usage
+
+```c
+#include <sigma.memory/memory.h>
+
+void example_arena_basic(void) {
+    // Create arena for temporary work
+    scope arena = Allocator.create_arena("workspace", SCOPE_POLICY_DYNAMIC);
+    if (!arena) {
+        // Max 14 arenas reached
+        return;
+    }
+    
+    // Allocate from arena
+    object buffer1 = Allocator.Scope.alloc(arena, 1024);
+    object buffer2 = Allocator.Scope.alloc(arena, 2048);
+    
+    // Use buffers...
+    memset(buffer1, 0, 1024);
+    memset(buffer2, 0, 2048);
+    
+    // Dispose entire arena (all allocations freed)
+    Allocator.dispose_arena(arena);
+    // buffer1, buffer2 now invalid
+}
+```
+
+### Example: Arena as Current Scope
+
+```c
+void example_arena_as_current(void) {
+    scope arena = Allocator.create_arena("current", SCOPE_POLICY_RECLAIMING);
+    
+    // Get SLB0 reference to restore later
+    scope slb0 = Memory.get_scope(1);
+    
+    // Switch to arena as current scope
+    Allocator.Scope.set(arena);
+    
+    // Allocator.alloc() now uses arena
+    object ptr1 = Allocator.alloc(256);
+    object ptr2 = Allocator.alloc(512);
+    
+    // Switch back to SLB0
+    Allocator.Scope.set(slb0);
+    
+    // Cleanup
+    Allocator.dispose_arena(arena);
+}
+```
+
+### Example: Multiple Isolated Arenas
+
+```c
+void example_multiple_arenas(void) {
+    // Create arenas for different subsystems
+    scope audio_arena = Allocator.create_arena("audio", SCOPE_POLICY_FIXED);
+    scope render_arena = Allocator.create_arena("render", SCOPE_POLICY_DYNAMIC);
+    scope network_arena = Allocator.create_arena("network", SCOPE_POLICY_RECLAIMING);
+    
+    // Each arena has independent allocation space
+    object audio_buf = Allocator.Scope.alloc(audio_arena, 4096);
+    object render_buf = Allocator.Scope.alloc(render_arena, 8192);
+    object net_buf = Allocator.Scope.alloc(network_arena, 1024);
+    
+    // Dispose one arena doesn't affect others
+    Allocator.dispose_arena(audio_arena);
+    
+    // render_buf and net_buf still valid
+    // ...
+    
+    // Cleanup
+    Allocator.dispose_arena(render_arena);
+    Allocator.dispose_arena(network_arena);
+}
+```
+
+### Arena Characteristics
+
+| Property | Value | Notes |
+|----------|-------|-------|
+| Max arenas | 14 concurrent | Slots 2-15 in scope_table |
+| Page size | 8 KB | Automatic page chaining |
+| Allocation speed | O(1) | Simple bump pointer |
+| Deallocation | Arena-wide only | No individual free |
+| Name length | 15 chars + null | Truncated if longer |
+| Overhead | 32 bytes/page | Page sentinel metadata |
+
+### Arena Policies
+
+| Policy | Description | Use Case |
+|--------|-------------|----------|
+| `SCOPE_POLICY_RECLAIMING` | Future: block reuse | General purpose (currently same as DYNAMIC) |
+| `SCOPE_POLICY_DYNAMIC` | Auto-grows, unlimited pages | Long-lived workspaces |
+| `SCOPE_POLICY_FIXED` | Single page, fails when full | Size-bounded operations |
+
+### Arena Limitations
+
+- **No individual deallocation**: Must dispose entire arena
+- **14 arena limit**: System maximum (SLB1-14)
+- **Single-threaded**: Not thread-safe in v0.2.2
+- **Linear allocation only**: No free list or reuse within arena
 
 ---
 
@@ -216,9 +418,10 @@ If you see ~2KB "still reachable" from sigtest framework, this is expected and n
 
 | Version | Features |
 |---------|----------|
-| 0.2.0 | Dynamic page growth, free block size tracking |
-| 0.3.0 | User arenas (scope_table[2-15]) |
-| 1.0.0 | Frame checkpoints, full API stability |
+| **0.2.2** | ✅ **User arenas (14 concurrent, simple bump allocation)** |
+| 0.2.3 | Arena frames (frame support within arenas) |
+| 0.3.0 | Thread-safety, advanced policies |
+| 1.0.0 | Full API stability, production-ready |
 
 ---
 

@@ -1,12 +1,12 @@
-[2] Integration: B-Tree Allocator :    8 : 2026-02-12  10:41:47                 
+[2] Integration: B-Tree Allocator :    8 : 2026-03-07  09:14:46                 
 ================================================================================
-Running: Single block reuse via B-Tree                           5.592 ms [PASS]
-Running: Multiple alloc/dispose cycles                          28.919 ms [PASS]
-Running: Interleaved alloc/dispose (fragmentation)              22.474 ms [PASS]
-Running: Varying allocation sizes                                7.904 ms [PASS]
-Running: Stress test (100 cycles)                              344.842 ms [PASS]
-Running: No memory leaks in cycles                              34.371 ms [PASS]
-Running: Adjacent block coalescing                               2.630 ms [PASS]
-Running: Dynamic page allocation beyond initial 16              15.411 ms [PASS]
+Running: Single block reuse via B-Tree                           7.281 ms [PASS]
+Running: Multiple alloc/dispose cycles                          17.611 ms [PASS]
+Running: Interleaved alloc/dispose (fragmentation)              29.458 ms [PASS]
+Running: Varying allocation sizes                                8.905 ms [PASS]
+Running: Stress test (100 cycles)                              369.734 ms [PASS]
+Running: No memory leaks in cycles                              29.952 ms [PASS]
+Running: Adjacent block coalescing                               4.131 ms [PASS]
+Running: Dynamic page allocation beyond initial 16              21.347 ms [PASS]
 ================================================================================
 [2]     TESTS=  8        PASS=  8        FAIL=  0        SKIP=  0

@@ -16,7 +16,7 @@ ASAN_ENABLED=false
 ASAN_OPTIONS="detect_leaks=1:detect_stack_use_after_return=1:detect_invalid_pointer_pairs=1"
 
 # Base compiler flags
-BASE_CFLAGS="-Wall -Wextra -g -fPIC -std=$STD -I./include -I/usr/include -I/usr/include/sigma.core"
+BASE_CFLAGS="-Wall -Wextra -g -fPIC -std=$STD -I./include -I/usr/local/include"
 
 # Add ASAN flags if enabled
 if [ "$ASAN_ENABLED" = true ]; then
@@ -24,7 +24,7 @@ if [ "$ASAN_ENABLED" = true ]; then
 fi
 
 CFLAGS="$BASE_CFLAGS"
-TST_CFLAGS="$CFLAGS -DTSTDBG -I/usr/include/sigmatest"
+TST_CFLAGS="$CFLAGS -DTSTDBG -I/usr/local/include/sigma.test"
 LDFLAGS="-shared"
 TST_LDFLAGS="-lstest -L/usr/lib"
 

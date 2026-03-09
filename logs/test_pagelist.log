@@ -1,14 +1,14 @@
-[2] MTIS: PageList (Skip List) Operations :   10 : 2026-02-12  10:41:47         
+[2] MTIS: PageList (Skip List) Operations :   10 : 2026-03-08  15:18:58         
 ================================================================================
-Running: PageList: insert single page                            6.313 ms [PASS]
-Running: PageList: insert maintains address order                2.692 ms [PASS]
-Running: PageList: insert multiple pages                         2.534 ms [PASS]
-Running: PageList: find containing page                          1.856 ms [PASS]
-Running: PageList: find containing boundary                      1.846 ms [PASS]
-Running: PageList: find containing not found                     1.805 ms [PASS]
-Running: PageList: find for size                                 1.819 ms [PASS]
-Running: PageList: remove single page                            1.838 ms [PASS]
-Running: PageList: remove head page                              1.958 ms [PASS]
-Running: PageList: remove middle page                            2.355 ms [PASS]
+Running: PageList: insert single page                            7.860 ms [PASS]
+Running: PageList: insert maintains address order                2.675 ms [PASS]
+Running: PageList: insert multiple pages                         2.504 ms [PASS]
+Running: PageList: find containing page                          1.692 ms [PASS]
+Running: PageList: find containing boundary                      1.702 ms [PASS]
+Running: PageList: find containing not found                     1.679 ms [PASS]
+Running: PageList: find for size                                 1.708 ms [PASS]
+Running: PageList: remove single page                            1.721 ms [PASS]
+Running: PageList: remove head page                              1.819 ms [PASS]
+Running: PageList: remove middle page                            2.255 ms [PASS]
 ================================================================================
 [2]     TESTS= 10        PASS= 10        FAIL=  0        SKIP=  0

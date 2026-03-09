@@ -39,16 +39,17 @@
 
 // NodePool constants - Dynamic growth philosophy
 // Start small (2KB), double on exhaustion: 2KB → 4KB → 8KB → 16KB → 32KB
-#define NODE_POOL_INITIAL_SIZE (2 * 1024)  // 2KB initial (embraces dynamic growth)
+// TEMPORARY: Using 8KB initial size until mremap growth is implemented (Phase 7.6)
+#define NODE_POOL_INITIAL_SIZE (8 * 1024)  // 8KB initial (TODO: restore 2KB after mremap)
 #define NODE_POOL_INITIAL_COUNT 1024       // Initial node capacity (legacy - unused)
 #define NODE_SIZE sizeof(sc_node)          // 24 bytes (cache-friendly padding)
 
-// Phase 7: Initial allocation counts for 2KB NodePool (small start, grows as needed)
-// With 40-byte header and 2008 bytes available:
+// Phase 7: Initial allocation counts for 8KB NodePool (interim until mremap growth ready)
+// With 40-byte header and ~8152 bytes available:
 #define INITIAL_PAGE_NODES \
-    ((2048 - sizeof(nodepool_header)) / sizeof(page_node))  // ~100 page_nodes (20B each)
+    ((8192 - sizeof(nodepool_header)) / sizeof(page_node))  // ~407 page_nodes (20B each)
 #define INITIAL_BTREE_NODES \
-    ((2048 - sizeof(nodepool_header)) / sizeof(sc_node))  // ~83 btree_nodes (24B each)
+    ((8192 - sizeof(nodepool_header)) / sizeof(sc_node))  // ~339 btree_nodes (24B each)
 
 /**
  * @brief NodePool interface

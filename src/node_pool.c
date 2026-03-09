@@ -25,6 +25,7 @@
  * Description: Implementation of NodePool for B-Tree nodes
  */
 
+#define _GNU_SOURCE  // Required for mremap()
 #include "internal/node_pool.h"
 #include <stdio.h>
 #include <string.h>
@@ -345,9 +346,45 @@ uint16_t nodepool_alloc_page_node(scope scope_ptr) {
     // Check for collision with btree nodes growing down
     usize next_page_offset = header->page_alloc_offset + sizeof(page_node);
     if (next_page_offset >= header->btree_alloc_offset) {
-        // TODO: Implement mremap growth (Phase 7.6)
-        // For now, return exhausted
-        return PAGE_NODE_NULL;
+        // GROW POOL via mremap (v0.2.2)
+        usize old_capacity = header->capacity;
+        usize new_capacity = old_capacity * 2;  // Double capacity
+
+        void *new_base = mremap((void *)scope_ptr->nodepool_base, old_capacity, new_capacity,
+                                MREMAP_MAYMOVE  // Allow kernel to move if necessary
+        );
+
+        if (new_base == MAP_FAILED) {
+            // Growth failed - out of memory
+            return PAGE_NODE_NULL;
+        }
+
+        // Update scope reference (may have moved)
+        scope_ptr->nodepool_base = (addr)new_base;
+        header = (nodepool_header *)new_base;
+
+        // Update header capacity
+        header->capacity = new_capacity;
+
+        // btree_alloc_offset needs adjustment (grows from top)
+        // Old: capacity - btree_bytes_used
+        // New: new_capacity - btree_bytes_used
+        usize btree_bytes_used = old_capacity - header->btree_alloc_offset;
+
+        // CRITICAL: Move existing btree node data to new top region
+        // Before: [old_base ... existing_btree_nodes  old_capacity]
+        // After:  [new_base ... [empty space] ... existing_btree_nodes new_capacity]
+        if (btree_bytes_used > 0) {
+            void *old_btree_start = (void *)((addr)header + header->btree_alloc_offset);
+            void *new_btree_start = (void *)((addr)header + (new_capacity - btree_bytes_used));
+            memmove(new_btree_start, old_btree_start, btree_bytes_used);
+        }
+
+        // Update btree_alloc_offset to point at new top location
+        header->btree_alloc_offset = new_capacity - btree_bytes_used;
+
+        // Recalculate collision check with new capacity
+        next_page_offset = header->page_alloc_offset + sizeof(page_node);
     }
 
     // Calculate index (page_nodes start at index 1, index 0 is PAGE_NODE_NULL sentinel)
@@ -379,9 +416,40 @@ node_idx nodepool_alloc_btree_node(scope scope_ptr) {
     // Check for collision with page nodes growing up
     usize next_btree_offset = header->btree_alloc_offset - sizeof(sc_node);
     if (next_btree_offset <= header->page_alloc_offset) {
-        // TODO: Implement mremap growth (Phase 7.6)
-        // For now, return exhausted
-        return NODE_NULL;
+        // GROW POOL via mremap (Phase 1 Day 2: NPB-01/02/03)
+        usize old_capacity = header->capacity;
+        usize new_capacity = old_capacity * 2;
+
+        void *new_base =
+            mremap((void *)scope_ptr->nodepool_base, old_capacity, new_capacity, MREMAP_MAYMOVE);
+
+        if (new_base == MAP_FAILED) {
+            return NODE_NULL;
+        }
+
+        // Update scope and header
+        scope_ptr->nodepool_base = (addr)new_base;
+        header = (nodepool_header *)new_base;
+        header->capacity = new_capacity;
+
+        // Adjust btree_alloc_offset: btree grows from top, so we need to maintain
+        // the same "distance from top" in the new larger capacity
+        usize btree_bytes_used = old_capacity - header->btree_alloc_offset;
+
+        // CRITICAL: Move existing btree node data to new top region
+        // Before: [old_base ... existing_btree_nodes  old_capacity]
+        // After:  [new_base ... [empty space] ... existing_btree_nodes new_capacity]
+        if (btree_bytes_used > 0) {
+            void *old_btree_start = (void *)((addr)header + header->btree_alloc_offset);
+            void *new_btree_start = (void *)((addr)header + (new_capacity - btree_bytes_used));
+            memmove(new_btree_start, old_btree_start, btree_bytes_used);
+        }
+
+        // Update btree_alloc_offset to point at new top location
+        header->btree_alloc_offset = new_capacity - btree_bytes_used;
+
+        // Recalculate with new capacity
+        next_btree_offset = header->btree_alloc_offset - sizeof(sc_node);
     }
 
     // Advance allocation offset (grows down)
@@ -1081,7 +1149,8 @@ static node_idx btree_delete_recursive(scope scope_ptr, node_idx current_idx, no
 
         // Case 1: Leaf node (no children)
         if (current->left_idx == NODE_NULL && current->right_idx == NODE_NULL) {
-            // TODO: Free node back to pool
+            // Free node back to pool
+            NodePool.dispose_node(current_idx);
             return NODE_NULL;
         }
 
@@ -1089,13 +1158,15 @@ static node_idx btree_delete_recursive(scope scope_ptr, node_idx current_idx, no
         if (current->left_idx == NODE_NULL) {
             // Only right child
             node_idx result = current->right_idx;
-            // TODO: Free node back to pool
+            // Free node back to pool
+            NodePool.dispose_node(current_idx);
             return result;
         }
         if (current->right_idx == NODE_NULL) {
             // Only left child
             node_idx result = current->left_idx;
-            // TODO: Free node back to pool
+            // Free node back to pool
+            NodePool.dispose_node(current_idx);
             return result;
         }
 

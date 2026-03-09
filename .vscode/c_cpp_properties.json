@@ -5,8 +5,9 @@
             "includePath": [
                 "${workspaceFolder}/include",
                 "${workspaceFolder}/**",
-                "/usr/include",
-                "/usr/local/include/**"
+                "/usr/local/include",
+                "/usr/include/sigma.core",
+                "/usr/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

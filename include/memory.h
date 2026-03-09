@@ -67,6 +67,16 @@ typedef struct sc_allocator_i {
     object (*alloc)(usize size);
     void (*dispose)(object ptr);
     sc_allocator_scope_i Scope;
+    
+    // Frame operations (v0.2.1)
+    frame (*frame_begin)(void);
+    integer (*frame_end)(frame f);
+    usize (*frame_depth)(void);
+    usize (*frame_allocated)(frame f);
+    
+    // Arena operations (v0.2.2)
+    scope (*create_arena)(const char *name, sbyte policy);
+    void (*dispose_arena)(scope s);
 } sc_allocator_i;
 extern const sc_allocator_i Allocator;
 #endif

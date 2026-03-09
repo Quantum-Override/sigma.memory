@@ -1,1 +1,0 @@
-stress/test_memory_exhaustion.c
