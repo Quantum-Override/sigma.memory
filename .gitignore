@@ -1,4 +1,6 @@
 
 /build/test
+/build
+/package
 *.o
 *.bak

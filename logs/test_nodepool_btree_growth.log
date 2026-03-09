@@ -1,0 +1,7 @@
+[2] NodePool: BTree Node Growth :    3 : 2026-03-08  15:18:58                   
+================================================================================
+Running: NPB-01: Prevent btree_node exhaustion                  48.597 ms [PASS]
+Running: NPB-02: Automatic btree_node mremap growth             52.636 ms [PASS]
+Running: NPB-03: Mixed page+btree node growth                   85.867 ms [PASS]
+================================================================================
+[2]     TESTS=  3        PASS=  3        FAIL=  0        SKIP=  0

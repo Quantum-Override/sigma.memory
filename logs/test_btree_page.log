@@ -1,0 +1,18 @@
+[2] MTIS: Per-Page B-Tree Operations :   14 : 2026-03-08  15:18:58              
+================================================================================
+Running: B-Tree: warmup                                          8.410 ms [PASS]
+Running: B-Tree: insert single node                              2.715 ms [PASS]
+Running: B-Tree: insert maintains BST                            2.125 ms [PASS]
+Running: B-Tree: insert updates count                            2.073 ms [PASS]
+Running: B-Tree: search exact match                              2.154 ms [PASS]
+Running: B-Tree: search not found                                2.077 ms [PASS]
+Running: B-Tree: search best fit                                 2.455 ms [PASS]
+Running: B-Tree: delete leaf                                     2.095 ms [PASS]
+Running: B-Tree: delete single child                             1.982 ms [PASS]
+Running: B-Tree: delete two children                             2.086 ms [PASS]
+Running: B-Tree: coalesce left neighbor                          2.106 ms [PASS]
+Running: B-Tree: coalesce right neighbor                         2.019 ms [PASS]
+Running: B-Tree: coalesce both neighbors                         1.981 ms [PASS]
+Running: B-Tree: coalesce not adjacent                           1.765 ms [PASS]
+================================================================================
+[2]     TESTS= 14        PASS= 14        FAIL=  0        SKIP=  0

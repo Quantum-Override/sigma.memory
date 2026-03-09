@@ -26,6 +26,7 @@
  */
 
 #include "internal/memory.h"
+#include "internal/node_pool.h"
 #include "internal/slab_manager.h"
 #include "memory.h"
 // ----------------
@@ -46,13 +47,28 @@ static void slb0_dispose(object ptr);
 block_header memory_get_first_header(void);
 static object memory_alloc_for_scope(void *scope_ptr, usize size);
 static void memory_dispose_for_scope(void *scope_ptr, object ptr);
-static scope get_scope_table_entry(usize index);
+scope get_scope_table_entry(usize index);
+
+// Frame operations (v0.2.1)
+static frame frame_begin_impl(void);
+static integer frame_end_impl(frame f);
+static usize frame_depth_impl(void);
+static usize frame_allocated_impl(frame f);
+static object alloc_from_frame(scope scope_ptr, usize size);
+static int register_large_alloc_with_frame(scope scope_ptr, addr alloc_addr, usize alloc_size);
+
+// Arena operations (v0.2.2)
+static scope arena_create_impl(const char *name, sbyte policy);
+static void arena_dispose_impl(scope s);
+static object arena_alloc(scope arena, usize size);
+static void arena_dispose_ptr(scope arena, object ptr);
+static page_sentinel arena_alloc_new_page(scope arena);
 
 static void *sys0 = NULL;
 static sbyte sys_page[SYS0_PAGE_SIZE] __attribute__((aligned(SYS0_PAGE_SIZE)));
 // Scope table lives in SYS0 data area after header block
 // scope_table[0]=SYS0, scope_table[1]=SLB0, [2-15]=user arenas
-static scope scope_table = NULL;  // Points into SYS0 data area
+static scope scope_table = NULL;
 
 // Internal register access functions
 static addr registers_get(sbyte index) {
@@ -71,7 +87,6 @@ static void registers_set(sbyte index, addr value) {
     // Set register array via pointer arithmetic
     ((addr *)regs)[index] = value;
 }
-
 // Get SYS0 page base address from R0
 static addr get_sys0_base(void) {
     return registers_get(REG_SYS0_BASE);
@@ -107,19 +122,19 @@ static object sys0_alloc(usize size) {
                 hdr->size = aligned;
                 hdr->flags &=
                     ~(BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT);  // Mark as allocated
-                hdr->next_off = (uint)(new_hdr_off - (addr)sys_page);
+                hdr->next_off = (uint32_t)(new_hdr_off - (addr)sys_page);
 
                 // Create new free block header
                 block_header new_hdr = (block_header)new_hdr_off;
                 new_hdr->next_off = 0;  // Will be last block
-                new_hdr->size = (uint)(free_size - aligned - sizeof(sc_blk_header));
+                new_hdr->size = (uint32_t)(free_size - aligned - sizeof(sc_blk_header));
                 new_hdr->flags = BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT;
 
                 ptr = (object)payload_off;
             } else {
                 // === NO-SPLIT PATH ===
                 hdr->next_off = 0;  // No next block
-                hdr->size = (uint)free_size;
+                hdr->size = (uint32_t)free_size;
                 hdr->flags &=
                     ~(BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT);  // Mark as allocated
 
@@ -138,71 +153,9 @@ static object sys0_alloc(usize size) {
 exit:
     return ptr;
 }
-
 // SYS0 disposal (mark block as free)
 static void sys0_dispose(object ptr) {
     (void)ptr;  // TODO: implement - mark block FREE, coalesce adjacent
-}
-
-// Helper: Find page containing pointer (returns NULL if not in any SLB0 page)
-static page_sentinel slb0_find_page(object ptr) {
-    scope slb0 = get_scope_table_entry(1);
-    if (slb0 == NULL || slb0->first_page_off == 0) {
-        return NULL;
-    }
-
-    addr ptr_addr = (addr)ptr;
-    page_sentinel page = (page_sentinel)slb0->first_page_off;
-
-    while (page != NULL) {
-        addr page_start = (addr)page;
-        addr page_end = page_start + SYS0_PAGE_SIZE;
-
-        if (ptr_addr >= page_start && ptr_addr < page_end) {
-            return page;
-        }
-
-        if (page->next_page_off == 0) {
-            break;
-        }
-        page = (page_sentinel)page->next_page_off;
-    }
-
-    return NULL;
-}
-
-// Helper: Try to allocate from free list (max 3 attempts)
-static object slb0_alloc_from_free_list(page_sentinel page, usize aligned_size) {
-    if (page->free_list_head == 0) {
-        return NULL;
-    }
-
-    free_block prev = NULL;
-    free_block current = (free_block)page->free_list_head;
-    int attempts = 0;
-    const int MAX_ATTEMPTS = 3;
-
-    while (current != NULL && attempts < MAX_ATTEMPTS) {
-        if (current->size >= aligned_size) {
-            // Found a fit - remove from list
-            if (prev == NULL) {
-                page->free_list_head = current->next_free_off;
-            } else {
-                prev->next_free_off = current->next_free_off;
-            }
-            page->alloc_count++;
-            return (object)current;
-        }
-
-        prev = current;
-        if (current->next_free_off == 0) {
-            break;
-        }
-        current = (free_block)current->next_free_off;
-        attempts++;
-    }
-
-    return NULL;  // No fit found in 3 attempts
 }
 
 // Helper: Bump allocate from a page
@@ -221,9 +174,83 @@ static object slb0_bump_alloc(page_sentinel page, usize aligned_size) {
     return (object)alloc_start;
 }
 
-// SLB0 allocation (free list search + bump pointer)
+// Helper: Allocate a new page dynamically and register it
+static page_sentinel slb0_alloc_new_page(scope slb0) {
+    if (slb0 == NULL) {
+        return NULL;
+    }
+
+    // Allocate a new 8KB page via mmap
+    void *new_page =
+        mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (new_page == MAP_FAILED) {
+        return NULL;
+    }
+
+    // Initialize page sentinel
+    page_sentinel ps = (page_sentinel)new_page;
+    ps->scope_id = slb0->scope_id;
+    ps->page_index = (sbyte)slb0->page_count;  // Sequential index
+    ps->flags = 0;
+    ps->bump_offset = sizeof(sc_page_sentinel);  // 32 bytes
+    ps->_pad[0] = 0;
+    ps->_pad[1] = 0;
+    ps->_pad[2] = 0;
+    ps->_pad[3] = 0;
+    ps->_pad[4] = 0;
+    ps->_pad[5] = 0;
+    ps->free_list_head = 0;
+    ps->alloc_count = 0;
+    ps->next_page_off = 0;  // Will be last page
+
+    // Find the last page in the chain and link to it
+    page_sentinel last_page = (page_sentinel)slb0->first_page_off;
+    if (last_page != NULL) {
+        while (last_page->next_page_off != 0) {
+            last_page = (page_sentinel)last_page->next_page_off;
+        }
+        last_page->next_page_off = (addr)new_page;
+    } else {
+        // First page ever (shouldn't happen for SLB0, but handle it)
+        slb0->first_page_off = (addr)new_page;
+    }
+
+    // Register in skip list (MTIS Tier 1)
+    uint16_t page_idx = nodepool_alloc_page_node(slb0);
+    if (page_idx == PAGE_NODE_NULL) {
+        // Failed to allocate page_node - unmap and return NULL
+        munmap(new_page, SYS0_PAGE_SIZE);
+        return NULL;
+    }
+
+    page_node *pn = nodepool_get_page_node(slb0, page_idx);
+    if (pn == NULL) {
+        // Failed to get page_node - unmap and return NULL
+        munmap(new_page, SYS0_PAGE_SIZE);
+        return NULL;
+    }
+
+    // Initialize page_node
+    pn->page_base = (addr)new_page;
+    pn->btree_root = NODE_NULL;
+    pn->block_count = 0;
+    for (int i = 0; i < SKIP_LIST_MAX_LEVEL; i++) {
+        pn->forward[i] = PAGE_NODE_NULL;
+    }
+
+    // Insert into skip list
+    skiplist_insert(slb0, (addr)new_page, page_idx);
+
+    // Update scope page count
+    slb0->page_count++;
+
+    return ps;
+}
+
+// SLB0 allocation (B-Tree search + bump pointer fallback)
 static object slb0_alloc(usize size) {
     object ptr = NULL;
+    bool register_with_frame = false;  // Track if we need to register large allocation
     scope slb0 = get_scope_table_entry(1);
     if (slb0 == NULL || size == 0) {
         goto exit;
@@ -233,120 +260,175 @@ static object slb0_alloc(usize size) {
     usize aligned_size = size < SLB0_MIN_ALLOC ? SLB0_MIN_ALLOC : size;
     aligned_size = (aligned_size + (kAlign - 1)) & ~(kAlign - 1);
 
-    // Start from current page
+    // Check if in frame context - try frame allocation first
+    // Fall back to normal allocation if frame can't handle it (e.g., too large)
+    if (slb0->current_frame_idx != NODE_NULL) {
+        ptr = alloc_from_frame(slb0, aligned_size);
+        if (ptr != NULL) {
+            goto exit;  // Frame allocation succeeded
+        }
+        // Fall through to normal allocation for oversized requests
+        // Mark that we need to register this with the frame
+        register_with_frame = true;
+    }
+
+    // MTIS Tier 1: Find page with space using skip list
+    uint16_t page_idx = PAGE_NODE_NULL;
+    if (skiplist_find_for_size(slb0, aligned_size, &page_idx) == OK) {
+        page_node *pn = nodepool_get_page_node(slb0, page_idx);
+        if (pn == NULL) {
+            goto fallback_bump;
+        }
+
+        // MTIS Tier 2: Search page's B-tree for free block (best-fit)
+        node_idx free_node = NODE_NULL;
+        if (btree_page_find_free(slb0, page_idx, aligned_size, &free_node) == OK) {
+            sc_node *node = nodepool_get_btree_node(slb0, free_node);
+            if (node != NULL && node->length >= aligned_size) {
+                ptr = (object)node->start;
+
+                // Split block if remainder is useful
+                if (node->length > aligned_size + SLB0_MIN_ALLOC) {
+                    addr remainder_start = node->start + aligned_size;
+                    usize remainder_length = node->length - aligned_size;
+
+                    // BUGFIX: Reuse existing node for allocated block instead of delete+insert
+                    // This prevents NodePool exhaustion from split operations
+                    node->length = aligned_size;
+                    node->info &= ~NODE_FREE_FLAG;  // Mark as allocated
+
+                    // Insert remainder as new free block
+                    node_idx remainder_idx = NODE_NULL;
+                    btree_page_insert(slb0, page_idx, remainder_start, remainder_length,
+                                      &remainder_idx);
+                    if (remainder_idx != NODE_NULL) {
+                        sc_node *remainder = nodepool_get_btree_node(slb0, remainder_idx);
+                        if (remainder != NULL) {
+                            remainder->info |= NODE_FREE_FLAG;  // Mark as free
+                        }
+                    }
+                } else {
+                    // Use entire block - just mark as allocated
+                    node->info &= ~NODE_FREE_FLAG;  // Clear free flag
+                }
+
+                goto exit;
+            }
+        }
+
+        // No free blocks in B-tree, try bump allocation from this page
+        page_sentinel ps = (page_sentinel)pn->page_base;
+        ptr = slb0_bump_alloc(ps, aligned_size);
+        if (ptr != NULL) {
+            // Track allocation in MTIS
+            btree_page_insert(slb0, page_idx, (addr)ptr, aligned_size, NULL);
+            goto exit;
+        }
+    }
+
+fallback_bump:
+    // Fallback: Legacy bump allocation from page chain
     page_sentinel page = (page_sentinel)slb0->current_page_off;
     if (page == NULL) {
         page = (page_sentinel)slb0->first_page_off;
     }
 
-    // Try each page in chain
     while (page != NULL) {
-        // Try free list first (max 3 attempts)
-        ptr = slb0_alloc_from_free_list(page, aligned_size);
-        if (ptr != NULL) {
-            slb0->current_page_off = (addr)page;
-            goto exit;
-        }
-
-        // Try bump allocation
         ptr = slb0_bump_alloc(page, aligned_size);
         if (ptr != NULL) {
             slb0->current_page_off = (addr)page;
+
+            // Track allocation in MTIS
+            uint16_t tracking_page_idx = PAGE_NODE_NULL;
+            if (skiplist_find_containing(slb0, (addr)ptr, &tracking_page_idx) == OK) {
+                btree_page_insert(slb0, tracking_page_idx, (addr)ptr, aligned_size, NULL);
+            }
+
             goto exit;
         }
 
-        // Move to next page
         if (page->next_page_off == 0) {
-            break;  // No more pages (FIXED policy would return NULL here)
+            break;
         }
         page = (page_sentinel)page->next_page_off;
     }
 
-    // TODO: DYNAMIC policy - allocate new page and chain it
+    // DYNAMIC policy - allocate new page and chain it
+    page_sentinel new_page = slb0_alloc_new_page(slb0);
+    if (new_page != NULL) {
+        ptr = slb0_bump_alloc(new_page, aligned_size);
+        if (ptr != NULL) {
+            slb0->current_page_off = (addr)new_page;
+
+            // Track allocation in MTIS
+            uint16_t new_page_idx = PAGE_NODE_NULL;
+            if (skiplist_find_containing(slb0, (addr)ptr, &new_page_idx) == OK) {
+                btree_page_insert(slb0, new_page_idx, (addr)ptr, aligned_size, NULL);
+            }
+        }
+    }
 
 exit:
+    // Register large allocations with frame if we're in frame context
+    // and allocation succeeded via normal path (not alloc_from_frame)
+    if (register_with_frame && ptr != NULL) {
+        register_large_alloc_with_frame(slb0, (addr)ptr, aligned_size);
+    }
+    
     return ptr;
 }
 
-// Helper: Unlink and release a page from the chain
-static void slb0_release_page(page_sentinel page) {
-    scope slb0 = get_scope_table_entry(1);
-    if (slb0 == NULL) {
-        return;
-    }
-
-    // Find the page before this one
-    page_sentinel prev = NULL;
-    page_sentinel current = (page_sentinel)slb0->first_page_off;
-
-    while (current != NULL && current != page) {
-        prev = current;
-        if (current->next_page_off == 0) {
-            return;  // Page not found in chain
-        }
-        current = (page_sentinel)current->next_page_off;
-    }
-
-    if (current != page) {
-        return;  // Page not in chain
-    }
-
-    // Unlink the page
-    if (prev == NULL) {
-        // Releasing first page
-        slb0->first_page_off = page->next_page_off;
-        if (slb0->first_page_off != 0) {
-            SlabManager.set_slab_slot(1, slb0->first_page_off);
-        } else {
-            SlabManager.set_slab_slot(1, ADDR_EMPTY);
-        }
-    } else {
-        prev->next_page_off = page->next_page_off;
-    }
-
-    // Update current_page_off if needed
-    if (slb0->current_page_off == (addr)page) {
-        slb0->current_page_off = slb0->first_page_off;
-    }
-
-    slb0->page_count--;
-
-    // Release the page back to OS
-    munmap(page, SYS0_PAGE_SIZE);
-}
-
-// SLB0 disposal (page-level tracking with free list)
+// SLB0 disposal (MTIS-based deallocation)
 static void slb0_dispose(object ptr) {
     if (ptr == NULL) {
         return;
     }
 
-    // Find the page containing this pointer
-    page_sentinel page = slb0_find_page(ptr);
-    if (page == NULL) {
-        return;  // Not in SLB0
+    scope slb0 = get_scope_table_entry(1);
+    if (slb0 == NULL) {
+        return;
     }
 
-    // Calculate block size (we don't store it, so use minimum)
-    // TODO: Store size in allocation for proper free list sizing
-    free_block fb = (free_block)ptr;
-    fb->size = SLB0_MIN_ALLOC;  // Conservative estimate
-    fb->next_free_off = page->free_list_head;
-    page->free_list_head = (addr)fb;
+    // MTIS Tier 1: Find page containing this address
+    uint16_t page_idx = PAGE_NODE_NULL;
+    if (skiplist_find_containing(slb0, (addr)ptr, &page_idx) != OK) {
+        return;  // Not in any tracked page
+    }
 
-    // Decrement allocation count
-    if (page->alloc_count > 0) {
+    page_node *pn = nodepool_get_page_node(slb0, page_idx);
+    if (pn == NULL) {
+        return;
+    }
+
+    // MTIS Tier 2: Find allocation in page's B-tree
+    node_idx alloc_node = NODE_NULL;
+    if (btree_page_search(slb0, page_idx, (addr)ptr, &alloc_node) != OK) {
+        return;  // Not tracked in B-tree
+    }
+
+    // Mark block as free
+    sc_node *node = nodepool_get_btree_node(slb0, alloc_node);
+    if (node != NULL) {
+        node->info |= NODE_FREE_FLAG;  // Set free flag
+    }
+
+    // Coalesce with adjacent free blocks
+    btree_page_coalesce(slb0, page_idx, alloc_node);
+
+    // Decrement allocation count on legacy page sentinel
+    page_sentinel page = (page_sentinel)pn->page_base;
+    if (page != NULL && page->alloc_count > 0) {
         page->alloc_count--;
     }
 
-    // Release page if empty
-    if (page->alloc_count == 0 && page->bump_offset > sizeof(sc_page_sentinel)) {
-        slb0_release_page(page);
-    }
+    // NOTE: Do NOT release empty pages when using MTIS!
+    // The B-tree still has nodes pointing to addresses on this page.
+    // Page release requires removing all page's nodes from tree first.
+    // TODO: Implement proper page release with tree cleanup when alloc_count == 0
 }
 
 // Get scope table entry by index
-static scope get_scope_table_entry(usize index) {
+scope get_scope_table_entry(usize index) {
     if (scope_table == NULL || index >= SCOPE_TABLE_COUNT) {
         return NULL;
     }
@@ -387,7 +469,7 @@ object memory_alloc(usize size) {
             ptr = slb0_alloc(size);
             break;
         default:  // User arenas (2-15)
-            // TODO: implement user arena allocation
+            ptr = arena_alloc(current_scope, size);
             break;
     }
 
@@ -410,7 +492,7 @@ void memory_dispose(object ptr) {
             slb0_dispose(ptr);
             break;
         default:  // User arenas (2-15)
-            // TODO: implement user arena disposal
+            arena_dispose_ptr(current_scope, ptr);
             break;
     }
 }
@@ -431,7 +513,7 @@ static object memory_alloc_for_scope(void *scope_ptr, usize size) {
             ptr = slb0_alloc(size);
             break;
         default:  // User arenas (2-15)
-            // TODO: implement user arena allocation
+            ptr = arena_alloc(explicit_scope, size);
             break;
     }
 
@@ -454,7 +536,7 @@ static void memory_dispose_for_scope(void *scope_ptr, object ptr) {
             slb0_dispose(ptr);
             break;
         default:  // User arenas (2-15)
-            // TODO: implement user arena disposal
+            arena_dispose_ptr(explicit_scope, ptr);
             break;
     }
 }
@@ -529,7 +611,7 @@ sbyte memory_state(void) {
 
     // Check footer placement alignment
     sc_blk_footer *ftr = (sc_blk_footer *)(sys_page + SYS0_PAGE_SIZE - sizeof(sc_blk_footer));
-    if (((addr)ftr % _Alignof(uint)) == 0) {
+    if (((addr)ftr % _Alignof(uint32_t)) == 0) {
         state |= MEM_STATE_ALIGN_FOOTER;
     }
 
@@ -539,8 +621,15 @@ sbyte memory_state(void) {
         state |= MEM_STATE_USER_READY;
     }
 
+    // Check if bootstrap is complete
+    extern bool __bootstrap_complete;
+    if (__bootstrap_complete) {
+        state |= MEM_STATE_BOOTSTRAP_COMPLETE;
+    }
+
     return state;
 }
+
 // Return pointer to SYS0 first block header
 block_header memory_get_first_header(void) {
     block_header hdr = NULL;
@@ -565,11 +654,558 @@ exit:
 }
 // Get slab slot base address
 addr memory_get_slots_base(void) {
-    return (addr)(sys_page + SYS0_SLOTS_OFFSET);
+    return (addr)(sys_page + SYS0_SLAB_TABLE_OFFSET);
 }
 // Get slab slot end address
 addr memory_get_slots_end(void) {
-    return (addr)(sys_page + SYS0_SLOTS_OFFSET + SYS0_SLOTS_SIZE);
+    return (addr)(sys_page + SYS0_SLAB_TABLE_OFFSET + SYS0_SLAB_TABLE_SIZE);
+}
+#endif
+
+#if 1  // Region: Frame Operations (v0.2.1)
+/**
+ * Begin a new frame for bulk deallocation.
+ * Allocates initial 4KB chunk from free space, uses bump allocation within chunk.
+ * Chains additional chunks if frame grows beyond 4KB.
+ *
+ * @return Opaque frame handle, NULL if max depth exceeded or out of memory
+ */
+static frame frame_begin_impl(void) {
+    scope s = get_scope_table_entry(1);  // SLB0
+    if (s == NULL) {
+        return NULL;
+    }
+    
+    // Check nesting limit
+    if (s->frame_depth >= MAX_FRAME_DEPTH) {
+        return NULL;
+    }
+    
+    // Find 4KB free block using skip list + B-tree
+    uint16_t chunk_idx = NODE_NULL;
+    uint16_t page_idx = PAGE_NODE_NULL;
+    
+    // Try to find free block via skip list search
+    if (skiplist_find_for_size(s, FRAME_CHUNK_SIZE, &page_idx) == OK) {
+        if (btree_page_find_free(s, page_idx, FRAME_CHUNK_SIZE, &chunk_idx) != OK) {
+            chunk_idx = NODE_NULL;
+        }
+    }
+    
+    // If no free block found, allocate new page
+    if (chunk_idx == NODE_NULL) {
+        page_sentinel new_page = slb0_alloc_new_page(s);
+        if (new_page == NULL) {
+            return NULL;  // Out of memory
+        }
+        
+        // Find the new page in skip list
+        if (skiplist_find_containing(s, (addr)new_page, &page_idx) != OK) {
+            return NULL;
+        }
+        
+        // Bump allocate frame chunk from new page
+        addr chunk_addr = (addr)new_page + new_page->bump_offset;
+        if (new_page->bump_offset + FRAME_CHUNK_SIZE > SYS0_PAGE_SIZE) {
+            return NULL;  // Page doesn't have enough space (shouldn't happen)
+        }
+        new_page->bump_offset += FRAME_CHUNK_SIZE;
+        
+        // Insert node into B-tree to track this frame chunk
+        if (btree_page_insert(s, page_idx, chunk_addr, FRAME_CHUNK_SIZE, &chunk_idx) != OK) {
+            return NULL;
+        }
+    }
+    
+    // Initialize frame chunk
+    sc_node *frame_node = nodepool_get_btree_node(s, chunk_idx);
+    if (frame_node == NULL) {
+        return NULL;
+    }
+    
+    // Mark as allocated frame chunk
+    frame_node->info &= ~NODE_FREE_FLAG;  // Clear FREE flag
+    frame_node->info |= FRAME_NODE_FLAG;   // Set FRAME flag
+    frame_node->length = FRAME_CHUNK_SIZE;
+    frame_node->frame_data.frame_offset = 0;
+    frame_node->frame_data.next_chunk_idx = NODE_NULL;
+    frame_node->frame_data.frame_id = ++s->frame_counter;
+    
+    // Update scope state
+    s->current_frame_idx = chunk_idx;
+    s->current_chunk_idx = chunk_idx;
+    
+    // Push to frame stack
+    s->frame_stack[s->frame_depth].frame_id = frame_node->frame_data.frame_id;
+    s->frame_stack[s->frame_depth].head_chunk_idx = chunk_idx;
+    s->frame_stack[s->frame_depth].large_allocs_head = NODE_NULL;
+    s->frame_stack[s->frame_depth].total_allocated = 0;
+    s->frame_depth++;
+    
+    return (frame)(uintptr_t)chunk_idx;  // Opaque handle
+}
+
+/**
+ * Allocate from current frame using bump allocation within chunks.
+ * Chains new 4KB chunk if current chunk is full.
+ *
+ * @param scope_ptr Scope pointer (SLB0)
+ * @param size Aligned size to allocate
+ * @return Pointer to allocated memory, NULL if out of memory
+ */
+static object alloc_from_frame(scope scope_ptr, usize size) {
+    if (scope_ptr == NULL || scope_ptr->current_chunk_idx == NODE_NULL) {
+        return NULL;
+    }
+    
+    // Reject allocations larger than chunk size (would corrupt memory)
+    // Fall back to normal allocation for large requests
+    if (size > FRAME_CHUNK_SIZE) {
+        return NULL;  // Caller should use normal Allocator.alloc()
+    }
+    
+    // Get current chunk
+    sc_node *chunk = nodepool_get_btree_node(scope_ptr, scope_ptr->current_chunk_idx);
+    if (chunk == NULL) {
+        return NULL;
+    }
+    
+    // Fast path: fits in current chunk
+    if (chunk->frame_data.frame_offset + size <= FRAME_CHUNK_SIZE) {
+        addr ptr = chunk->start + chunk->frame_data.frame_offset;
+        chunk->frame_data.frame_offset += size;
+        scope_ptr->frame_stack[scope_ptr->frame_depth - 1].total_allocated += size;
+        return (object)ptr;
+    }
+    
+    // Slow path: need new chunk
+    uint16_t new_chunk_idx = NODE_NULL;
+    uint16_t page_idx = PAGE_NODE_NULL;
+    
+    // Find free block for new chunk
+    if (skiplist_find_for_size(scope_ptr, FRAME_CHUNK_SIZE, &page_idx) == OK) {
+        if (btree_page_find_free(scope_ptr, page_idx, FRAME_CHUNK_SIZE, &new_chunk_idx) != OK) {
+            new_chunk_idx = NODE_NULL;
+        }
+    }
+    
+    // Allocate new page if no free block
+    if (new_chunk_idx == NODE_NULL) {
+        page_sentinel new_page = slb0_alloc_new_page(scope_ptr);
+        if (new_page == NULL) {
+            return NULL;  // Out of memory
+        }
+        
+        if (skiplist_find_containing(scope_ptr, (addr)new_page, &page_idx) != OK) {
+            return NULL;
+        }
+        
+        // Bump allocate chunk from new page
+        addr chunk_addr = (addr)new_page + new_page->bump_offset;
+        if (new_page->bump_offset + FRAME_CHUNK_SIZE > SYS0_PAGE_SIZE) {
+            return NULL;  // Page doesn't have enough space
+        }
+        new_page->bump_offset += FRAME_CHUNK_SIZE;
+        
+        // Insert node to track this chunk
+        if (btree_page_insert(scope_ptr, page_idx, chunk_addr, FRAME_CHUNK_SIZE, &new_chunk_idx) != OK) {
+            return NULL;
+        }
+    }
+    
+    // Initialize new chunk
+    sc_node *new_chunk = nodepool_get_btree_node(scope_ptr, new_chunk_idx);
+    if (new_chunk == NULL) {
+        return NULL;
+    }
+    
+    new_chunk->info &= ~NODE_FREE_FLAG;
+    new_chunk->info |= FRAME_NODE_FLAG;
+    new_chunk->length = FRAME_CHUNK_SIZE;
+    new_chunk->frame_data.frame_offset = size;  // First allocation
+    new_chunk->frame_data.next_chunk_idx = NODE_NULL;
+    new_chunk->frame_data.frame_id = chunk->frame_data.frame_id;  // Same frame
+    
+    // Chain to previous chunk
+    chunk->frame_data.next_chunk_idx = new_chunk_idx;
+    scope_ptr->current_chunk_idx = new_chunk_idx;
+    
+    // Allocate from new chunk
+    scope_ptr->frame_stack[scope_ptr->frame_depth - 1].total_allocated += size;
+    return (object)new_chunk->start;
+}
+
+/**
+ * Register a large allocation (>4KB) with the current frame for cleanup.
+ * Creates a tracking entry that will be freed when frame_end() is called.
+ *
+ * @param scope_ptr Current scope (SLB0)
+ * @param alloc_addr Address of the large allocation
+ * @param alloc_size Size of the large allocation
+ * @return OK on success, ERR if not in frame context or out of nodes
+ */
+static int register_large_alloc_with_frame(scope scope_ptr, addr alloc_addr, usize alloc_size) {
+    if (scope_ptr == NULL || scope_ptr->frame_depth == 0) {
+        return ERR;  // Not in frame context
+    }
+    
+    // Find the B-tree node that tracks this allocation
+    uint16_t page_idx = PAGE_NODE_NULL;
+    if (skiplist_find_containing(scope_ptr, alloc_addr, &page_idx) != OK) {
+        return ERR;  // Can't find page
+    }
+    
+    // Search for the node in the page's B-tree
+    node_idx alloc_node_idx = NODE_NULL;
+    if (btree_page_search(scope_ptr, page_idx, alloc_addr, &alloc_node_idx) != OK) {
+        return ERR;  // Can't find allocation node
+    }
+    
+    sc_node *alloc_node = nodepool_get_btree_node(scope_ptr, alloc_node_idx);
+    if (alloc_node == NULL) {
+        return ERR;
+    }
+    
+    // Mark as frame-tracked large allocation
+    alloc_node->info |= FRAME_LARGE_FLAG;
+    
+    // Link into frame's large allocation list (LIFO)
+    alloc_node->large_alloc_data.next_large_alloc = 
+        scope_ptr->frame_stack[scope_ptr->frame_depth - 1].large_allocs_head;
+    scope_ptr->frame_stack[scope_ptr->frame_depth - 1].large_allocs_head = alloc_node_idx;
+    
+    // Update total allocated
+    scope_ptr->frame_stack[scope_ptr->frame_depth - 1].total_allocated += alloc_size;
+    
+    return OK;
+}
+
+/**
+ * End current frame, marking all chunks as FREE and coalescing.
+ * Restores parent frame context if nested.
+ *
+ * @param f Frame handle from frame_begin()
+ * @return OK on success, ERR if invalid frame or not in frame context
+ */
+static integer frame_end_impl(frame f) {
+    scope s = get_scope_table_entry(1);  // SLB0
+    if (s == NULL || s->frame_depth == 0) {
+        return ERR;  // Not in frame context
+    }
+    
+    uint16_t frame_idx = (uint16_t)(uintptr_t)f;
+    if (s->current_frame_idx != frame_idx) {
+        return ERR;  // Frame mismatch (wrong nesting order)
+    }
+    
+    // Step 1: Free large allocations (>4KB, B-tree allocated)
+    uint16_t large_idx = s->frame_stack[s->frame_depth - 1].large_allocs_head;
+    while (large_idx != NODE_NULL) {
+        sc_node *large_node = nodepool_get_btree_node(s, large_idx);
+        if (large_node == NULL) {
+            break;
+        }
+        
+        uint16_t next_large = large_node->large_alloc_data.next_large_alloc;
+        
+        // Mark as free and coalesce
+        large_node->info |= NODE_FREE_FLAG;
+        large_node->info &= ~FRAME_LARGE_FLAG;
+        
+        // Find page for coalescing
+        uint16_t page_idx = PAGE_NODE_NULL;
+        if (skiplist_find_containing(s, large_node->start, &page_idx) == OK) {
+            btree_page_coalesce(s, page_idx, large_idx);
+        }
+        
+        large_idx = next_large;
+    }
+    
+    // Step 2: Free frame chunks (4KB, bump allocated)
+    uint16_t chunk_idx = s->frame_stack[s->frame_depth - 1].head_chunk_idx;
+    
+    // Walk chunk chain and mark all as FREE
+    while (chunk_idx != NODE_NULL) {
+        sc_node *chunk = nodepool_get_btree_node(s, chunk_idx);
+        if (chunk == NULL) {
+            break;
+        }
+        
+        uint16_t next = chunk->frame_data.next_chunk_idx;
+        
+        // Mark chunk as FREE
+        chunk->info |= NODE_FREE_FLAG;
+        chunk->info &= ~FRAME_NODE_FLAG;
+        chunk->frame_data.frame_offset = 0;
+        chunk->frame_data.next_chunk_idx = NODE_NULL;
+        chunk->frame_data.frame_id = 0;
+        
+        // Find page containing this chunk for coalescing
+        uint16_t page_idx = PAGE_NODE_NULL;
+        if (skiplist_find_containing(s, chunk->start, &page_idx) == OK) {
+            btree_page_coalesce(s, page_idx, chunk_idx);
+        }
+        
+        chunk_idx = next;
+    }
+    
+    // Pop frame stack
+    s->frame_depth--;
+    
+    // Restore parent frame context (if nested)
+    if (s->frame_depth > 0) {
+        s->current_frame_idx = s->frame_stack[s->frame_depth - 1].head_chunk_idx;
+        
+        // Find current chunk (last in parent's chain)
+        chunk_idx = s->current_frame_idx;
+        sc_node *node = nodepool_get_btree_node(s, chunk_idx);
+        while (node != NULL && node->frame_data.next_chunk_idx != NODE_NULL) {
+            chunk_idx = node->frame_data.next_chunk_idx;
+            node = nodepool_get_btree_node(s, chunk_idx);
+        }
+        s->current_chunk_idx = chunk_idx;
+    } else {
+        s->current_frame_idx = NODE_NULL;
+        s->current_chunk_idx = NODE_NULL;
+    }
+    
+    return OK;
+}
+
+/**
+ * Get current frame nesting depth.
+ *
+ * @return Frame depth (0 = no active frames, 1+ = nested frames)
+ */
+static usize frame_depth_impl(void) {
+    scope s = get_scope_table_entry(1);  // SLB0
+    if (s == NULL) {
+        return 0;
+    }
+    return s->frame_depth;
+}
+
+/**
+ * Get total bytes allocated in a frame.
+ *
+ * @param f Frame handle
+ * @return Total allocated bytes, 0 if invalid frame
+ */
+static usize frame_allocated_impl(frame f) {
+    scope s = get_scope_table_entry(1);  // SLB0
+    if (s == NULL || s->frame_depth == 0) {
+        return 0;
+    }
+    
+    uint16_t frame_idx = (uint16_t)(uintptr_t)f;
+    
+    // Find matching frame in stack
+    for (uint8_t i = 0; i < s->frame_depth; i++) {
+        if (s->frame_stack[i].head_chunk_idx == frame_idx) {
+            return s->frame_stack[i].total_allocated;
+        }
+    }
+    
+    return 0;
+}
+#endif
+
+#if 1  // Region: Arena Allocation (v  0.2.2 Day 6)
+/**
+ * Allocate a new page for arena and chain it
+ *
+ * @param arena Arena scope
+ * @return page_sentinel pointer or NULL on failure
+ */
+static page_sentinel arena_alloc_new_page(scope arena) {
+    if (arena == NULL) {
+        return NULL;
+    }
+    
+    // Allocate 8KB page via mmap
+    page_sentinel new_page = (page_sentinel)mmap(NULL, SYS0_PAGE_SIZE,
+                                                   PROT_READ | PROT_WRITE,
+                                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (new_page == MAP_FAILED) {
+        return NULL;
+    }
+    
+    // Initialize page sentinel
+    new_page->bump_offset = sizeof(sc_page_sentinel);  // Start after sentinel
+    new_page->alloc_count = 0;
+    new_page->next_page_off = 0;  // Will be last page
+    
+    // Chain to arena's page list
+    if (arena->first_page_off == 0) {
+        // First page
+        arena->first_page_off = (addr)new_page;
+        arena->current_page_off = (addr)new_page;
+    } else {
+        // Append to end of chain
+        page_sentinel current = (page_sentinel)arena->current_page_off;
+        if (current != NULL) {
+            current->next_page_off = (addr)new_page;
+        }
+        arena->current_page_off = (addr)new_page;
+    }
+    
+    arena->page_count++;
+    
+    return new_page;
+}
+
+/**
+ * Allocate from arena using simple bump allocation
+ *
+ * @param arena Arena scope
+ * @param size Requested size in bytes
+ * @return Pointer to allocated memory or NULL
+ */
+static object arena_alloc(scope arena, usize size) {
+    if (arena == NULL || size == 0) {
+        return NULL;
+    }
+    
+    // Align size to 16-byte boundary
+    usize aligned_size = (size + (kAlign - 1)) & ~(kAlign - 1);
+    
+    // Get current page
+    page_sentinel current_page = (page_sentinel)arena->current_page_off;
+    
+    // Check if current page has space
+    if (current_page != NULL) {
+        usize available = SYS0_PAGE_SIZE - current_page->bump_offset;
+        if (available >= aligned_size) {
+            // Allocate from current page
+            object ptr = (object)((addr)current_page + current_page->bump_offset);
+            current_page->bump_offset += aligned_size;
+            current_page->alloc_count++;
+            return ptr;
+        }
+    }
+    
+    // Current page full or no pages exist - allocate new page
+    page_sentinel new_page = arena_alloc_new_page(arena);
+    if (new_page == NULL) {
+        return NULL;
+    }
+    
+    // Allocate from new page
+    object ptr = (object)((addr)new_page + new_page->bump_offset);
+    new_page->bump_offset += aligned_size;
+    new_page->alloc_count++;
+    
+    return ptr;
+}
+
+/**
+ * Dispose pointer in arena (no-op for now - simple arenas don't reclaim)
+ *
+ * @param arena Arena scope
+ * @param ptr Pointer to dispose
+ */
+static void arena_dispose_ptr(scope arena, object ptr) {
+    // No-op: Simple arenas don't support individual deallocation
+    // Memory is freed when entire arena is disposed
+    (void)arena;
+    (void)ptr;
+}
+#endif
+
+#if 1  // Region: Arena Lifecycle (v0.2.2)
+/**
+ * Create a new arena with given name and policy.
+ * Finds free slot in scope_table[2-15], creates NodePool, returns scope.
+ *
+ * @param name Arena name (truncated to 15 chars)
+ * @param policy Allocation policy (POOLING, RECLAIMING, GROWABLE)
+ * @return scope pointer or NULL on exhaustion
+ */
+static scope arena_create_impl(const char *name, sbyte policy) {
+    scope result = NULL;
+    
+    // Find free slot in scope_table[2-15]
+    for (usize i = 2; i < 16; i++) {
+        scope s = get_scope_table_entry(i);
+        if (s == NULL || s->nodepool_base == ADDR_EMPTY) {
+            // Found free slot
+            if (s == NULL) {
+                // Slot not allocated, allocate from SYS0
+                s = (scope)sys0_alloc(sizeof(sc_scope));
+                if (s == NULL) {
+                    goto exit;
+                }
+                // Write to scope_table
+                scope_table[i] = *s;
+                s = &scope_table[i];
+            }
+            
+            // Initialize scope structure
+            memset(s, 0, sizeof(sc_scope));
+            s->scope_id = (uint8_t)i;
+            s->policy = policy;
+            s->flags = 0;  // User arenas are not protected/pinned
+            
+            // Copy name (truncate to 15 chars + null terminator)
+            if (name != NULL) {
+                strncpy(s->name, name, 15);
+                s->name[15] = '\0';
+            } else {
+                s->name[0] = '\0';
+            }
+            
+            // Initialize NodePool for this arena
+            if (nodepool_init(s) != OK) {
+                // NodePool creation failed
+                memset(s, 0, sizeof(sc_scope));
+                s->nodepool_base = ADDR_EMPTY;
+                goto exit;
+            }
+            
+            result = s;
+            goto exit;
+        }
+    }
+    
+    // No free slots found (exhaustion)
+exit:
+    return result;
+}
+
+/**
+ * Dispose arena and free its resources.
+ * Shuts down NodePool, unmaps all pages, and clears scope_table slot.
+ *
+ * @param s Scope pointer to dispose
+ */
+static void arena_dispose_impl(scope s) {
+    if (s == NULL) {
+        return;
+    }
+    
+    // Validate scope is user arena (2-15)
+    uint8_t id = s->scope_id;
+    if (id < 2 || id > 15) {
+        return;  // Cannot dispose SYS0/SLB0 or invalid scope
+    }
+    
+    // Free all pages in page chain
+    addr page_addr = s->first_page_off;
+    while (page_addr != 0) {
+        page_sentinel page = (page_sentinel)page_addr;
+        addr next_addr = page->next_page_off;
+        munmap(page, SYS0_PAGE_SIZE);
+        page_addr = next_addr;
+    }
+    
+    // Shutdown NodePool
+    if (s->nodepool_base != ADDR_EMPTY) {
+        nodepool_shutdown(s);
+    }
+    
+    // Clear scope structure
+    memset(s, 0, sizeof(sc_scope));
+    s->nodepool_base = ADDR_EMPTY;
 }
 #endif
 
@@ -585,6 +1221,12 @@ const sc_allocator_i Allocator = {
             .alloc = memory_alloc_for_scope,
             .dispose = memory_dispose_for_scope,
         },
+    .frame_begin = frame_begin_impl,
+    .frame_end = frame_end_impl,
+    .frame_depth = frame_depth_impl,
+    .frame_allocated = frame_allocated_impl,
+    .create_arena = arena_create_impl,
+    .dispose_arena = arena_dispose_impl,
 };
 #endif
 
@@ -598,6 +1240,7 @@ const sc_memory_i Memory = {
     .SlabManager = &SlabManager,
     .get_slots_base = memory_get_slots_base,
     .get_slots_end = memory_get_slots_end,
+    .get_scope = get_scope_table_entry,
 };
 #endif
 
@@ -622,7 +1265,7 @@ static void init_scope_table_sys0(void) {
     sys0_entry->name[2] = 'S';
     sys0_entry->name[3] = '0';
     sys0_entry->name[4] = '\0';
-    sys0_entry->reserved[0] = 0;
+    sys0_entry->nodepool_base = ADDR_EMPTY;
 }
 
 __attribute__((constructor)) void init_memory_system(void) {
@@ -687,7 +1330,13 @@ __attribute__((constructor)) void init_memory_system(void) {
     slb0->name[2] = 'B';
     slb0->name[3] = '0';
     slb0->name[4] = '\0';
-    slb0->reserved[0] = 0;
+    slb0->nodepool_base = ADDR_EMPTY;
+    
+    // Initialize frame fields (v0.2.1)
+    slb0->current_frame_idx = NODE_NULL;
+    slb0->current_chunk_idx = NODE_NULL;
+    slb0->frame_counter = 0;
+    slb0->frame_depth = 0;
 
     // Allocate 16 pages for SLB0 (64KB total)
     const usize SLB0_PAGE_COUNT = 16;
@@ -728,30 +1377,106 @@ __attribute__((constructor)) void init_memory_system(void) {
     slb0->current_page_off = (addr)slb0_pages;  // Start at first page
     slb0->page_count = SLB0_PAGE_COUNT;
 
-    // Register SLB0 page-0 in slab_slots[1]
-    SlabManager.set_slab_slot(1, (addr)slb0_pages);
+    // Register SLB0 page-0 in slab_table[1]
+    SlabManager.set_slab_entry(1, (addr)slb0_pages);
 
-    // Set R7 to point to SLB0 (make it the current scope)
+    // Initialize per-scope NodePool for SLB0 (Phase 7)
+    // NodePool uses mmap() so must happen after SYS0 bootstrap
+    int btree_init_result = nodepool_init(slb0);
+    if (btree_init_result != OK) {
+        fprintf(stderr, "FATAL: Unable to initialize NodePool for SLB0 scope\n");
+        abort();
+    }
+
+    // Populate skip list with initial 16 pages (Phase 7.6 - MTIS Tier 1)
+    for (usize i = 0; i < SLB0_PAGE_COUNT; i++) {
+        addr page_addr = (addr)((sbyte *)slb0_pages + i * SYS0_PAGE_SIZE);
+        uint16_t page_idx = nodepool_alloc_page_node(slb0);
+        if (page_idx == PAGE_NODE_NULL) {
+            fprintf(stderr, "FATAL: Unable to allocate page_node for SLB0 page %zu\n", i);
+            abort();
+        }
+
+        page_node *pn = nodepool_get_page_node(slb0, page_idx);
+        if (pn == NULL) {
+            fprintf(stderr, "FATAL: Unable to get page_node for index %u\n", page_idx);
+            abort();
+        }
+
+        pn->page_base = page_addr;
+        pn->btree_root = NODE_NULL;  // B-tree starts empty (Phase 7.7)
+        pn->block_count = 0;
+        for (int lvl = 0; lvl < SKIP_LIST_MAX_LEVEL; lvl++) {
+            pn->forward[lvl] = PAGE_NODE_NULL;
+        }
+
+        if (skiplist_insert(slb0, page_addr, page_idx) != OK) {
+            fprintf(stderr, "FATAL: Unable to insert page %zu into skip list\n", i);
+            abort();
+        }
+    }
+
+    // B-Tree starts empty (slb0_btree_root = NODE_NULL)
+    // As blocks are freed via slb0_dispose(), they populate the tree
+    // Future allocations will search tree for best-fit blocks
+
+    // Mark bootstrap complete and switch to SLB0 as default scope
+    // WARNING: After this point, sys0_alloc() will abort if called
+    extern bool __bootstrap_complete;
+    __bootstrap_complete = true;
     memory_set_current_scope(slb0);
 
     //
 }
+
+// Bootstrap completion flag (checked by memory_state and sys0_alloc)
+bool __bootstrap_complete = false;
 __attribute__((destructor)) void shutdown_memory_system(void) {
     // Release SLB0 pages back to OS
     scope slb0 = get_scope_table_entry(1);
     if (slb0 != NULL && slb0->first_page_off != 0) {
-        // Walk the page chain and release each page
-        page_sentinel page = (page_sentinel)slb0->first_page_off;
-        while (page != NULL) {
-            page_sentinel next =
-                (page->next_page_off != 0) ? (page_sentinel)page->next_page_off : NULL;
-            munmap(page, SYS0_PAGE_SIZE);
-            page = next;
+        const usize SLB0_INITIAL_PAGE_COUNT = 16;
+        void *slb0_initial_base = (void *)slb0->first_page_off;
+
+        // Find page 17 (first dynamic page) BEFORE unmapping initial block
+        page_sentinel dynamic_page = NULL;
+        if (slb0->page_count > SLB0_INITIAL_PAGE_COUNT) {
+            page_sentinel page = (page_sentinel)slb0->first_page_off;
+            usize page_idx = 0;
+
+            // Traverse to page 16 to get its next_page_off (page 17)
+            while (page != NULL && page_idx < SLB0_INITIAL_PAGE_COUNT) {
+                if (page->next_page_off == 0) {
+                    break;
+                }
+                if (page_idx == SLB0_INITIAL_PAGE_COUNT - 1) {
+                    // At page 16, save pointer to page 17
+                    dynamic_page = (page_sentinel)page->next_page_off;
+                    break;
+                }
+                page = (page_sentinel)page->next_page_off;
+                page_idx++;
+            }
         }
+
+        // Now unmap initial 16-page block
+        munmap(slb0_initial_base, SLB0_INITIAL_PAGE_COUNT * SYS0_PAGE_SIZE);
+
+        // Unmap any dynamically allocated pages (beyond initial 16)
+        if (dynamic_page != NULL) {
+            page_sentinel page = dynamic_page;
+            while (page != NULL) {
+                page_sentinel next =
+                    (page->next_page_off != 0) ? (page_sentinel)page->next_page_off : NULL;
+                munmap(page, SYS0_PAGE_SIZE);
+                page = next;
+            }
+        }
+
         slb0->first_page_off = 0;
         slb0->current_page_off = 0;
         slb0->page_count = 0;
-        SlabManager.set_slab_slot(1, ADDR_EMPTY);
+        SlabManager.set_slab_entry(1, ADDR_EMPTY);
     }
     // SYS0 is static - no cleanup needed
     sys0 = NULL;

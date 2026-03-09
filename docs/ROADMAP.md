@@ -1,146 +1,389 @@
 # SigmaCore Memory - Roadmap
 
-
-**Current Version:** 0.2.0 (in development)
-**Last Updated:** January 29, 2026
-
----
-
-## v0.2.0 Implementation Plan (Final)
-
-### Features
-
-1. **Free Block Size Tracking**
-     - Add a `size` field to the free block struct.
-     - Minimum allocation size for SLB0 is now `sizeof(free_block)` (with alignment).
-     - Update allocation/free-list logic to use this new size.
-     - **Testing:**
-         - New test set: `test/test_slab0_v2.c`.
-         - Tests for splitting, reuse, and minimum allocation size.
-         - Only update `test_slab0` if directly affected.
-
-2. **sys0_dispose Coalescing**
-     - On disposal, merge adjacent free blocks.
-     - Update headers/footers as needed.
-     - **Testing:**
-         - New test set: `test/test_sys0_v2.c`.
-         - Tests for coalescing two or more blocks, edge cases.
-         - Only update existing tests if invariants change.
-
-3. **SLB0 Frame Support**
-     - Add a single frame struct to `sc_scope` (no nesting for SLB0).
-     - On `begin_frame`, save bump pointer/allocation state for the slab.
-     - On `end_frame`, restore state, bulk-reclaiming allocations since frame start.
-     - Assert/error if nested frames attempted.
-     - **Testing:**
-         - New test set: `test/test_slab0_frame.c`.
-         - Tests for correct frame semantics, error on nesting, free list interaction.
-
-### Design Notes
-
-- Frame tracking is embedded in `sc_scope` (allocated in SYS0, not user memory).
-- For future arenas, frame stack can be added to `sc_scope` (with max depth).
-- SLB0 MVP: single frame only, no nesting.
-- All new features are tested in versioned, isolated test sets.
+**Current Version:** 0.2.2-arenas (Arena System + Dynamic NodePool Growth) ✅  
+**Last Updated:** March 8, 2026  
+**Branch:** main
 
 ---
 
----
+## v0.2.2-arenas - Arena System ✅ COMPLETE
 
-## How This Works
+**Status:** ✅ Implementation complete, 31/31 tests passing, 0 bytes leaked
 
-1. **Everything is prioritized** - debt, features, ideas all in one list
-2. **Top 2-3 items** are the next things we work on
-3. **After each release**, re-evaluate and reorder
-4. **Nothing is rigid** - priorities shift based on needs
-5. **Ideas welcome** - even far-out concepts go on the list
+**Key Features:**
+- ✅ User arenas: 14 concurrent scopes (scope_id 2-15)
+- ✅ Simple bump allocation: O(1), no metadata overhead
+- ✅ NodePool dynamic growth: 8KB→16KB→32KB via mremap
+- ✅ Arena API: `create_arena(name, policy)`, `dispose_arena(scope)`
+- ✅ Bulk disposal: munmap all pages + NodePool shutdown
+- ✅ 31 tests across 7 test files (unit, validation, integration)
 
----
+**Implementation:**
+- Days 1-3: NodePool growth (page_node, btree_node, validation) - 11 tests ✅
+- Days 4-6: Arena lifecycle (create, dispose, allocate) - 15 tests ✅
+- Day 7: Integration & stress tests - 5 tests ✅
 
-## 🎯 Next Up
+**Performance:**
+- Arena allocation: O(1) bump pointer (vs O(log n) for SLB0)
+- Arena disposal: O(P) where P = page count (bulk munmap)
+- Zero per-allocation metadata overhead
+- 8KB pages with 8128 bytes usable (99.2% efficiency)
 
-The top items from the prioritized backlog. These are what we're working on now or next.
+**Documentation:**
+- ✅ USERS_GUIDE.md: Arena API with examples
+- ✅ MEMORY_REFERENCE.md: Technical architecture updated
+- ✅ All tests documented and validated
 
-| # | Item | Type | Effort | Notes |
-|---|------|------|--------|-------|
-| 1 | Free block size tracking | TD | Mid | Required for proper free list reuse |
-| 2 | Dynamic page growth | F | Mid | SLB0 can't grow past 16 pages |
-| 3 | `sys0_dispose` coalescing | TD | Mid | Stretch goal for 0.2.0 |
-
----
-
-## 📋 Prioritized Backlog
-
-Everything we want to do, roughly ordered by priority. Re-evaluated after each release.
-
-### Active / High Priority
-
-| ID | Item | Type | Effort | Description |
-|----|------|------|--------|-------------|
-| TD-02 | Free block size tracking | Debt | Mid | Store size in hidden header; enables proper free list reuse |
-| F-01 | Dynamic page growth | Feature | Mid | mmap new pages when SLB0 exhausted |
-| TD-01 | `sys0_dispose` coalescing | Debt | Mid | Mark FREE, merge adjacent blocks |
-| F-02 | User arenas | Feature | Hi | scope_table[2-15] for custom memory pools |
-| F-03 | Frame checkpoints | Feature | Mid | Save/restore for transactional rollback |
-| F-04 | Transient stack | Feature | Mid | LIFO scope for function-local temps |
-
-### Medium Priority
-
-| ID | Item | Type | Effort | Description |
-|----|------|------|--------|-------------|
-| F-05 | Object promotion | Feature | Mid | Move object from transient → heap |
-| F-06 | Cross-scope move | Feature | Mid | Transfer between arenas (copy fallback) |
-| F-07 | Scope introspection | Feature | Lo | Stats API for debugging/monitoring |
-| F-08 | Allocation callbacks | Feature | Lo | Hooks for profiling (compile-guarded) |
-
-### Low Priority
-
-| ID | Item | Type | Effort | Description |
-|----|------|------|--------|-------------|
-| F-09 | `SlotArray.set_at()` | Feature | Lo | Cleaner API in sigma.collections |
+**Deprecations:**
+- Frame API removed (v0.2.1) - replaced by arena system
+- Frame-specific constants removed
+- Chunked allocation removed
 
 ---
 
-## 💡 Ideas & Future Concepts
+## v0.2.1-frames - Frame Support ✅ DEPRECATED
 
-Wild ideas, long-term possibilities, things that might never happen but are worth capturing.
+**Why the pivot:**
+- Bitmap approach hit fundamental design issues (disposal size detection)
+- In-page metadata prevents 100% page utilization
+- B-Tree external tracking = true OS-level allocator model
 
-| ID | Idea | Notes |
-|----|------|-------|
-| I-01 | Handle-based allocation | Return handles instead of pointers; enables compaction |
-| I-02 | Generational GC layer | Optional GC on top of manual allocation |
-| I-03 | Memory-mapped persistence | Scopes that survive process restart |
-| I-04 | WASM target | Compile for WebAssembly (no mmap) |
-| I-05 | Thread-local arenas | Per-thread allocation pools (lock-free fast path) |
-| I-06 | Compressed pointers | 32-bit handles for 64-bit systems (< 4GB heaps) |
-| I-07 | Allocation patterns API | Hint system: "burst", "long-lived", "temporary" |
-| I-08 | Memory pressure callbacks | Notify app when approaching limits |
-| I-09 | Shared memory scopes | Cross-process arenas via shm |
-| I-10 | Debug mode poisoning | Fill freed memory with 0xDEADBEEF patterns |
+**Core Innovation:**
+- User pages: **100% payload** (no sentinels, headers, bitmaps)
+- All allocation metadata: external B-Tree nodes (18 bytes each)
+- Per-slab B-Tree roots (selective complexity)
+- Stack-based operations (register machine model)
 
----
-
-## 🏗️ Design Trade-offs (Accepted)
-
-Intentional decisions, not debt. These are features, not bugs.
-
-| ID | Trade-off | Rationale |
-|----|-----------|-----------|
-| DT-01 | 16-scope limit | Fixed array avoids dynamic allocation; sufficient for most apps |
-| DT-02 | 4KB page size | Matches OS page; balances granularity vs overhead |
-| DT-03 | No cross-scope pointers | Simplifies ownership; arenas isolated by design |
-| DT-04 | Bump-primary allocation | Fast path for common case; free list is fallback |
-| DT-05 | 3-attempt free list search | Bounds worst-case time; accepts some fragmentation |
-| DT-06 | No automatic compaction | Predictable performance; explicit promotion instead |
+**Key Metrics:**
+- SYS0: 4KB → **8KB** (6.6KB DAT available)
+- NodePool: **18KB** separate mmap (1,024 nodes)
+- Node size: **18 bytes** (start, length, children, hint)
+- Page utilization: **100%**
 
 ---
 
-## 🐛 Known Issues
+## v0.2.0 Implementation Plan (TDD-Driven)
 
-| ID | Issue | Severity | Notes |
-|----|-------|----------|-------|
-| KI-01 | Max single alloc ~4032 bytes | Low | Page size minus sentinel; documented limit |
-| KI-02 | Stale object files cause test failures | Low | `cbuild clean` when switching test modes |
+**Development Philosophy:**
+1. Write test first (red)
+2. Implement minimal passing code (green)
+3. Refactor for clarity (refactor)
+4. Move to next test
+
+**Test Coverage Target:** 90%+ line coverage, all allocation paths tested
+
+
+---
+
+## 🎯 Phase 1: Foundation (Bootstrap SYS0 @ 8KB)
+
+**Goal:** Update SYS0 from 4KB → 8KB, verify bootstrap tests pass
+
+**TDD Steps:**
+1. **Test:** Update `test_bootstrap.c` for 8KB expectations
+   - `SYS0_PAGE_SIZE = 8192`
+   - `FIRST_BLOCK_OFFSET = 1536`
+   - `LAST_FOOTER_OFFSET = 8184`
+2. **Code:** Update `include/internal/memory.h` constants
+3. **Code:** Update `src/memory.c` initialization
+4. **Verify:** `ctest bootstrap --valgrind` → 8/8 passing
+
+**Structures Changed:**
+- Remove: `sc_page_sentinel`, `sc_free_block` (obsolete)
+- Add: `sc_node` (18 bytes), `node_idx`, NodeTable layout
+- Update: SYS0 offsets (NodeTable @ 1320, NodeStack @ 1350)
+
+**Deliverable:** ✅ Bootstrap tests pass with 8KB SYS0, node structure defined
+
+---
+
+## 🎯 Phase 2: NodePool & Stack Infrastructure
+
+**Goal:** Initialize NodePool, R1 register caching, stack operations
+
+**TDD Steps:**
+1. **Test:** `test_node_pool_initialized()` - verify 18KB mmap, R1 set
+2. **Code:** Create `src/node_pool.c` - `init_node_pool()`
+3. **Test:** `test_node_alloc_from_freelist()` - allocate/free nodes
+4. **Code:** Implement `node_alloc()`, `node_free()`
+5. **Test:** `test_node_stack_operations()` - push/pop/peek
+6. **Code:** Create `src/node_stack.c` - stack primitives
+7. **Verify:** All node/stack tests passing
+
+**New Files:**
+- `include/internal/node_pool.h` - NodePool interface
+- `src/node_pool.c` - 18KB mmap, freelist, get_node()
+- `include/internal/node_stack.h` - Stack interface (16 slots)
+- `src/node_stack.c` - Stack operations
+
+**Key Functions:**
+- `init_node_pool()` - mmap 18KB, initialize freelist
+- `node_alloc()` / `node_free()` - freelist management
+- `get_node(idx)` - R1 + (idx * 18) → node pointer
+- `stack_push(idx, meta)` / `stack_pop()` - operations
+
+**Deliverable:** ✅ NodePool operational, stack working, 1024 nodes available
+
+---
+
+## 🎯 Phase 3: B-Tree Core Operations
+
+**Goal:** Implement BST primitives (search, insert, delete)
+
+**TDD Steps:**
+1. **Test:** `test_btree_insert_single()` - insert one node
+2. **Code:** Implement `btree_insert(root, start, length)`
+3. **Test:** `test_btree_search_by_addr()` - find by address
+4. **Code:** Implement `btree_search(root, addr)`
+5. **Test:** `test_btree_delete_node()` - remove node
+6. **Code:** Implement `btree_delete(root, addr)`
+7. **Test:** `test_btree_hint_calculation()` - log2(max_free)
+8. **Code:** Implement `btree_update_hints(idx)`
+9. **Verify:** All BST operations correct
+
+**New Files:**
+- `test/test_btree.c` - B-Tree unit tests
+- `include/internal/btree.h` - B-Tree interface
+- `src/btree.c` - Tree operations
+
+**Critical Functions:**
+- `btree_insert(root, start, length)` - add node, return new root
+- `btree_search(root, addr)` - find node by start address
+- `btree_delete(root, addr)` - remove node, return new root
+- `btree_update_hints(idx)` - recalculate log2 hints bottom-up
+
+**Deliverable:** ✅ BST working in isolation, hints correct, tree validated
+
+---
+
+## 🎯 Phase 4: Node Operations (Stack-Based)
+
+**Goal:** Implement split/merge using stack + register model
+
+**TDD Steps:**
+1. **Test:** `test_node_split_oversized()` - split large free block
+2. **Code:** Implement `nodes_split()` - pops stack, pushes result
+3. **Test:** `test_node_merge_adjacent()` - coalesce neighbors
+4. **Code:** Implement `nodes_merge()` - pops 2 nodes, merges
+5. **Test:** `test_btree_first_fit_hint()` - hint-guided search
+6. **Code:** Implement `btree_find_first_fit(root, size)`
+7. **Verify:** Operations use stack, results in R2
+
+**New Files:**
+- `include/internal/node_ops.h` - Operation interface
+- `src/node_ops.c` - Stack-based split/merge
+
+**Operation Pattern:**
+```c
+// Caller: push parameters, call operation, get result from R2
+stack_push(target_idx, alloc_size);
+nodes_split();
+node_idx result = Registers.get(R2);
+```
+
+**Key Functions:**
+- `nodes_split()` - split oversized node, remainder reinserted
+- `nodes_merge()` - coalesce adjacent free nodes
+- `btree_find_first_fit(root, size)` - log2 hint-guided search
+
+**Deliverable:** ✅ Split/merge working, first-fit efficient, stack-based
+
+---
+
+## 🎯 Phase 5: SLB0 Allocation (B-Tree Backend)
+
+**Goal:** Wire SLB0 to use B-Tree for allocation tracking
+
+**TDD Steps:**
+1. **Test:** `test_slb0_basic_alloc()` - allocate from SLB0
+2. **Code:** Update `slb0_alloc()` to use `btree_find_first_fit()`
+3. **Test:** `test_slb0_dispose()` - free allocation
+4. **Code:** Update `slb0_dispose()` to use `btree_search()`, mark free
+5. **Test:** `test_slb0_alloc_after_dispose()` - reuse freed space
+6. **Code:** Ensure coalescing on dispose
+7. **Test:** `test_slb0_multiple_allocations()` - stress test
+8. **Verify:** SLB0 fully functional with B-Tree
+
+**Modified Files:**
+- `src/memory.c` - rewrite `slb0_alloc()` / `slb0_dispose()`
+- `test/test_slb0_btree.c` - NEW test file
+
+**Allocation Flow:**
+```
+slb0_alloc(size) →
+  1. Get root: NodeTable[0]
+  2. btree_find_first_fit(root, size)
+  3. If found: nodes_split(), mark allocated
+  4. If not: mmap new page, create node, insert
+  5. Return node->start
+```
+
+**Disposal Flow:**
+```
+slb0_dispose(ptr) →
+  1. Get root: NodeTable[0]
+  2. btree_search(root, ptr)
+  3. Mark node free (bit 9)
+  4. nodes_merge() with neighbors
+  5. If page empty: munmap, delete node
+```
+
+**Deliverable:** ✅ SLB0 working with B-Tree, allocation/disposal correct
+
+---
+
+## 🎯 Phase 6: Diagnostics & Validation
+
+**Goal:** Create test hooks for internal inspection
+
+**TDD Steps:**
+1. **Test:** Use diagnostics in all existing tests
+2. **Code:** Implement diagnostic functions
+3. **Test:** `test_btree_validate_structure()` - integrity check
+4. **Code:** Implement tree validator
+5. **Verify:** All tests use diagnostics, no hidden bugs
+
+**New Files:**
+- `include/internal/diagnostics.h` - Test inspection API
+- `src/diagnostics.c` - Implementation
+
+**Diagnostic Functions:**
+```c
+// NodePool
+usize diag_node_pool_capacity(void);
+usize diag_node_pool_allocated(void);
+node_idx diag_node_freelist_head(void);
+
+// B-Tree
+usize diag_btree_height(node_idx root);
+usize diag_btree_node_count(node_idx root);
+bool diag_btree_validate(node_idx root);  // Check BST property
+void diag_btree_dump(node_idx root);      // Pretty-print tree
+
+// Slab
+usize diag_slab_page_count(sbyte slab_id);
+usize diag_slab_alloc_count(sbyte slab_id);
+```
+
+**Deliverable:** ✅ Full observability, tests validate internal state
+
+---
+
+## 🎯 Phase 7: Integration & Stress Testing
+
+**Goal:** End-to-end validation, edge cases, production readiness
+
+**TDD Steps:**
+1. **Test:** `test_alloc_1000_blocks()` - high-volume allocation
+2. **Test:** `test_random_alloc_pattern()` - chaos testing
+3. **Test:** `test_fragmentation_worst_case()` - adversarial patterns
+4. **Test:** `test_page_release_threshold()` - verify release logic
+5. **Verify:** Valgrind clean (0 leaks, 0 errors)
+
+**New Files:**
+- `test/test_integration.c` - End-to-end scenarios
+
+**Test Scenarios:**
+- Allocate/free 1000+ blocks random sizes
+- Allocate in ascending order, free in descending (fragmentation)
+- Interleave small/large allocations
+- Stress NodePool growth (exhaust 1024 nodes)
+- Verify hint maintenance under load
+
+**Deliverable:** ✅ Production-ready, stress-tested, valgrind clean
+
+---
+
+## 📋 Post-0.2.0 Roadmap
+
+Items for future releases, roughly prioritized:
+
+### High Priority (v0.2.1 Focus)
+| ID | Item | Description | Target | Status |
+|----|------|-------------|--------|--------|
+| F-01 | Frame Support (SLB0) | Frame ops for SLB0 with chunk-based bump allocator | v0.2.1 | ✅ Complete |
+| F-02 | Standard Arena/Frame API | User-facing frame create/dispose/introspect | v0.2.1 | ✅ Complete |
+| F-03 | Thread-Friendly Architecture | Design hooks for external task management (Sigma.Tasking) | v0.2.1 | Pending |
+| F-04 | Arena Extensions | Multi-slab frame support, nested frames | v0.2.1 | Pending |
+
+### Medium Priority (v0.3.0+)
+| ID | Item | Description | Target |
+|----|------|-------------|--------|
+| F-05 | User Arenas (SLB1-14) | Custom scopes, POLICY_RECLAIMING or BUMP | v0.3.0 |
+| F-06 | Thread-Safety Implementation | Lock strategy with Sigma.Tasking integration | v0.3.0 |
+| F-07 | sys0_dispose Coalescing | Implement block merging for SYS0 | v0.3.0 |
+| F-08 | Tree Rebalancing | AVL or RB-tree for pathological cases | v0.3.0+ |
+
+### Low Priority (Future)
+| ID | Item | Description | Target |
+|----|------|-------------|--------|
+| F-09 | Frame Checkpoints (Advanced) | Transactional save/restore for nested scopes | v0.3.0+ |
+| F-10 | Scope Introspection (Full) | Stats API (page_count, alloc_count, fragmentation) | v0.3.0+ |
+| F-11 | BUMP Policy Slabs | Simple bump allocator for deterministic use cases | v0.3.0+ |
+| F-12 | Allocation Hints | Size classes, burst patterns, best-fit vs first-fit | v0.3.0+ |
+
+### Ideas / Exploration
+| ID | Item | Description | Notes |
+|----|------|-------------|-------|
+| I-01 | Log2 Size Classes | Bucketing for faster search (2^n bins) | Post-frames |
+| I-02 | Per-Task Arena Contexts | Task-local slab assignments (Sigma.Tasking integration) | Requires F-06 |
+| I-03 | Memory Compaction | Defragment by moving allocations (handle-based) | Complex, far future |
+| I-04 | Debug Poisoning | Fill freed memory with 0xDEADBEEF | Useful for debugging |
+| I-05 | Scope Callbacks | Hooks for profiling (compile-guarded) | v0.3.0+ |
+
+---
+
+## 🏗️ Design Decisions (B-Tree Architecture)
+
+Intentional architectural choices for the v0.2.0 rewrite:
+
+| ID | Decision | Rationale |
+|----|----------|-----------|
+| DT-01 | 18-byte nodes (no padding) | Efficient: 1024 nodes in 18KB; no wasted space |
+| DT-02 | Log2 hint (8 bits) | Represents 2^0 to 2^255 bytes; excellent for bucketing |
+| DT-03 | FREE_FLAG in hint field | No separate flag byte; pack into existing field |
+| DT-04 | Stack-based operations | Register machine model; reduces ABI overhead |
+| DT-05 | Per-slab B-Trees | Selective complexity; BUMP slabs skip tree entirely |
+| DT-06 | 100% page utilization | Zero in-page metadata = true OS allocator model |
+| DT-07 | External NodePool (18KB) | Separate mmap; remappable for growth |
+| DT-08 | R1 for NodePool base | Fast index→pointer translation (no function call) |
+| DT-09 | First-fit (hint-guided) | Balance search time vs fragmentation |
+| DT-10 | No tree balancing (v0.2.0) | Defer complexity; validate need with real workloads |
+
+---
+
+## 🧪 TDD Best Practices
+
+**Red-Green-Refactor Cycle:**
+1. **Red:** Write failing test (defines contract)
+2. **Green:** Minimal code to pass test (no gold-plating)
+3. **Refactor:** Improve clarity without changing behavior
+4. Repeat
+
+**Test Organization:**
+- One test file per module (`test_btree.c`, `test_node_pool.c`)
+- Descriptive test names: `test_btree_insert_single()` vs `test_insert()`
+- Use diagnostic functions to validate internal state
+- Valgrind on every test run (`ctest --valgrind`)
+
+**Coverage Goals:**
+- Line coverage: 90%+
+- Branch coverage: 85%+
+- All allocation paths tested (success, failure, edge cases)
+
+**Test Pyramid:**
+```
+     /\
+    /  \      Integration (few)
+   /────\     - test_integration.c
+  /      \    - End-to-end scenarios
+ /────────\   Component (many)
+/          \  - test_btree.c, test_node_pool.c
+────────────  - Module-level functionality
+              Unit (most)
+              - Individual functions
+              - Edge cases, error paths
+```
 
 ---
 
@@ -148,219 +391,203 @@ Intentional decisions, not debt. These are features, not bugs.
 
 ### v0.1.0 ✅ (January 2026)
 
-**Theme:** Bootstrap + User Allocator
+**Branch:** master  
+**Theme:** Bootstrap Foundation
 
 **Delivered:**
 - SYS0 bootstrap (4KB static page)
-- Registers R0-R7 with R7 scope caching
+- Registers R0-R7 with scope caching
 - scope_table[16] unified design
-- slab_slots[16] parallel tracking
-- SLB0 user allocator (16 pages, 64KB)
-- Hybrid bump + free list allocation
+- SLB0 user allocator (16 pages, hybrid bump + free list)
 - Page release on empty
-- Proper shutdown cleanup
-- 30 tests (10 bootstrap + 20 slab0)
-- Documentation: USERS_GUIDE, MEMORY_REFERENCE, README
+- 30 tests passing (10 bootstrap + 20 slab0)
+- Documentation: MEMORY_DESIGN, MEMORY_REFERENCE, USERS_GUIDE
 
 ---
 
-### v0.2.0 (Next)
+### v0.2.0-alpha ✅ (February 12, 2026)
 
-**Theme:** Robustness & Growth
+**Branch:** rel-0.2.0-btree  
+**Tag:** v0.2.0-alpha  
+**Theme:** Metadata-External B-Tree Architecture
 
-**Planned:**
-- [ ] TD-02: Free block size tracking
-- [ ] F-01: Dynamic page growth
-- [ ] TD-01: `sys0_dispose` coalescing (stretch)
+**Major Changes:**
+- Complete redesign: bitmap → B-Tree external tracking
+- SYS0: 4KB → 8KB (6.6KB DAT)
+- NodePool: 2KB initial (grows dynamically: 2→4→8→16→32KB)
+- Node size: 24 bytes (cache-aligned, explicit reserved space)
+- Pages: 100% payload (no metadata)
+- Stack-based operations (register machine)
+- Per-slab B-Tree roots
 
----
+**Critical Bugfix:**
+- Block splitting reuses existing node (prevents pool exhaustion)
+- 40 iterations stable in 2KB pool vs 3.5 iterations before
 
-### Future Releases
+**Performance:**
+- 64B blocks: ~1.5M ops/sec
+- 1KB blocks: ~3.7M ops/sec
+- Mixed workload: ~5.7M ops/sec
+- 2-3x improvement over pre-bugfix state
 
-Versions beyond 0.2.0 will be scoped based on backlog priorities at the time. No rigid pre-assignment.
+**Test Coverage:**
+- 51 tests passing (bootstrap, btree, integration, validation, performance, frames)
+- Valgrind clean (no leaks, no errors)
 
----
+**Package:**
+- sigma.memory.o published to /usr/local/packages/
+- Ready for SigmaTest integration
 
-## Item Details
+**Phases:**
+- [x] Phase 0: Re-branch from v0.1.0, update docs, clean tests
+- [x] Phase 1: 8KB SYS0, node structure defined
+- [x] Phase 2: NodePool + Stack infrastructure
+- [x] Phase 3: B-Tree core operations
+- [x] Phase 4: Node split/merge ops
+- [x] Phase 5: SLB0 wired to B-Tree
+- [x] Phase 6: Diagnostics + validation
+- [x] Phase 7: Integration + stress testing
 
-Detailed descriptions for complex items. Reference by ID.
-
----
-
-### TD-01: `sys0_dispose` Coalescing
-
-**Problem:** SYS0 uses reclaiming policy but `sys0_dispose()` is a no-op.
-
-**Current:**
-```c
-static void sys0_dispose(object ptr) {
-    (void)ptr;  // TODO: implement
-}
-```
-
-**Solution:**
-1. Mark block as FREE
-2. Check next block - if FREE, merge
-3. Check previous block (via footer) - if FREE, merge
-4. Update footer size
-
-**Risk:** Low - SYS0 allocations are long-lived (scope_table, slotarray).
-
----
-
-### TD-02: Free Block Size Tracking
-
-**Problem:** `slb0_dispose()` stores `SLB0_MIN_ALLOC` for all freed blocks.
-
-**Current:**
-```c
-fb->size = SLB0_MIN_ALLOC;  // Conservative estimate
-```
-
-**Solution:** Hidden 8-byte header per allocation:
-```c
-typedef struct {
-    usize size;
-} sc_alloc_header;
-// Payload follows
-```
-
-**Impact:** +8 bytes overhead per allocation. Enables proper free list reuse.
+**Status:** ✅ COMPLETED (February 12, 2026)
 
 ---
 
-### F-01: Dynamic Page Growth
+### v0.2.1-frames ✅ (Completed - March 8, 2026)
 
-**Problem:** SLB0 has DYNAMIC policy but can't grow past 16 pages.
+**Theme:** Frame Support for SLB0
 
-**Solution:**
-1. When all pages exhausted, `mmap` new 4KB page
-2. Initialize page sentinel
-3. Link to end of chain
-4. Update scope page_count
+**Delivered:**
+- ✅ Frame operations (begin/end/depth/allocated) - 17/17 tests passing
+- ✅ Hybrid allocation (≤4KB=bump, >4KB=B-tree tracked)
+- ✅ Chunked bump allocators (4KB chunks, automatic chaining)
+- ✅ LIFO nesting (MAX_DEPTH=16)
+- ✅ Large allocation tracking (>4KB allocations owned by frames)
+- ✅ Valgrind clean (no leaks, no corruption)
 
-**Consideration:** Add max page limit to prevent runaway growth.
-
----
-
-### F-02: User Arenas
-
-**Purpose:** Custom memory pools in scope_table[2-15].
-
-**API:**
-```c
-scope arena = Allocator.Arena.create("MyArena", SCOPE_POLICY_FIXED, 4);
-object ptr = Allocator.Scope.alloc(arena, 256);
-Allocator.Arena.dispose(arena);  // Bulk free
-```
+**Status:** Production-ready for SLB0, ready for dog-fooding
 
 ---
 
-### F-03: Frame Checkpoints
+### v0.2.2 (Next - March 2026) ⚡ CRITICAL PATH
 
-**Purpose:** Transactional save/restore.
+**Theme:** Dog-Food Release - Arena Support for Sigma.Test & Anvil
 
-**API:**
-```c
-frame_id checkpoint = Allocator.Frame.save();
-// ... allocations ...
-if (error) {
-    Allocator.Frame.restore(checkpoint);
-} else {
-    Allocator.Frame.commit(checkpoint);
-}
-```
+**Mission:** Get minimal viable multi-arena support into the hands of Sigma.Test and Anvil teams to discover real-world requirements.
 
----
+**Critical Blockers:**
+1. **NodePool Growth (mremap)** - MUST implement
+   - Currently stubbed at node_pool.c:348, :382
+   - 8KB → 16KB → 32KB → 64KB automatic growth
+   - Multi-arena will exhaust 8KB pool quickly
+   - **Status:** Week 1 priority ⚡
 
-### F-04: Transient Stack
+2. **User Arenas (SLB1-15)** - MUST implement
+   - Arena.create/destroy API
+   - Per-arena allocation/disposal
+   - Per-arena frames (extend v0.2.1 model)
+   - POLICY_RECLAIMING only (B-Tree backed)
+   - **Status:** Week 1-2 implementation
 
-**Purpose:** LIFO scope for temporaries, auto-released on exit.
+3. **Thread-Friendly Hooks** - Design only
+   - Document coordination points for Sigma.Tasking
+   - No locks, no thread-safety (intentional)
+   - Hook architecture for external task management
+   - **Status:** Week 2 documentation
 
-**API:**
-```c
-Allocator.Transient.enter();
-object temp = Allocator.alloc(128);
-// ... use temp ...
-Allocator.Transient.exit();  // temp invalid
-```
+**Deliverables:**
+- ✅ NodePool automatically grows via mremap
+- ✅ 14 user arenas available (SLB1-14)
+- ✅ Arena create/destroy/allocate/dispose API
+- ✅ Per-arena frame support
+- ✅ Thread-friendly hooks documented (NOT implemented)
+- ✅ 60-70 tests passing (arena lifecycle, growth, isolation)
+- ✅ Integration examples for Sigma.Test and Anvil
 
-**Characteristics:** Bump-only, nestable, zero-cost exit.
+**Success Criteria:**
+- Sigma.Test can run tests in isolated arenas
+- Anvil can use per-module/per-phase arenas
+- Dog-food feedback informs v0.3.0 priorities
 
----
+**Timeline:** 3 weeks (target: March 29, 2026)
 
-### F-05: Object Promotion
-
-**Purpose:** Move object from short-lived → long-lived scope.
-
-**API:**
-```c
-Allocator.Transient.enter();
-object temp = Allocator.alloc(64);
-object permanent = Allocator.promote(temp);
-Allocator.Transient.exit();
-// permanent survives
-```
-
-**Note:** Caller must update all references.
-
----
-
-### F-06: Cross-Scope Move
-
-**Purpose:** Transfer between arenas.
-
-**API:**
-```c
-object moved = Allocator.move(ptr, target_arena);
-```
-
-**Implementation:** Copy + free (page transfer only if sole occupant).
+**Deferred to post-dog-food:**
+- POLICY_BUMP/FIXED (wait for proven need)
+- Thread-safety implementation (Sigma.Tasking not ready)
+- Advanced frame features (transactional, checkpoints)
 
 ---
 
-### F-07: Scope Introspection
+### v0.3.0 (Future - Q2 2026)
 
-**Purpose:** Query scope stats.
+**Theme:** Production Hardening - Informed by Dog-Food Feedback
 
-**API:**
-```c
-sc_scope_stats stats;
-Allocator.Scope.stats(scope, &stats);
-// stats.page_count, .used_bytes, .alloc_count, etc.
-```
+**Scope determined by Sigma.Test & Anvil usage:**
+- Additional policies if needed (POLICY_BUMP, POLICY_FIXED)
+- Thread-safety implementation (when Sigma.Tasking ready)
+- Performance optimizations based on profiling
+- Advanced frame features if basic frames insufficient
+- sys0_dispose coalescing (if fragmentation proves problematic)
+- Tree rebalancing (if pathological cases observed)
+
+**Planning:**
+- Week 1 (post-v0.2.2): Collect dog-food feedback
+- Week 2: Prioritize based on real-world pain points
+- Week 3-6: Implement highest-priority items
+- Week 7-8: Validation + production release
+
+**Philosophy:** Don't build what we don't need. Let real usage drive priorities.
 
 ---
 
-### F-08: Allocation Callbacks
+## 🐛 Known Issues
 
-**Purpose:** Hooks for profiling.
+### v0.2.1 (Current)
+| ID | Issue | Status | Notes |
+|----|-------|--------|-------|
+| KI-04 | Not thread-safe | Tracked | Thread-friendly design pending, implementation in v0.3.0 |
+| KI-05 | Single-threaded only | Tracked | Will be managed by Sigma.Tasking (v0.3.0) |
 
-**API:**
-```c
-Allocator.Hook.on_alloc(my_logger);
-Allocator.Hook.on_dispose(my_logger);
-```
+### Resolved Issues
+| ID | Issue | Status | Resolution | Version |
+|----|-------|--------|------------|----------|
+| KI-01 | Bootstrap tests outdated | ✅ Fixed | Updated for 8KB SYS0 | v0.2.0 |
+| KI-02 | Node pool exhaustion | ✅ Fixed | Dynamic growth (2→32KB), split reuses nodes | v0.2.0 |
+| KI-03 | No frame support | ✅ Fixed | Implemented chunk-based frames for SLB0 | v0.2.1 |
+| KI-06 | shutdown_memory_system use-after-free | ✅ Fixed | Fixed page chain traversal ordering | v0.2.1 |
 
-**Note:** Compile-guarded (`#ifdef SIGMA_MEMORY_HOOKS`).
+---
+
+## 📚 References
+
+**Documentation:**
+- [MEMORY_DESIGN.md](MEMORY_DESIGN.md) - v2.0 Architecture (B-Tree)
+- [MEMORY_REFERENCE.md](MEMORY_REFERENCE.md) - API Reference (needs update)
+- [BUILDING.md](../BUILDING.md) - Build instructions
+
+**Related Projects:**
+- [sigma.core](https://github.com/Quantum-Override/sigma.core) - Type definitions
+- [sigma.collections](https://github.com/Quantum-Override/sigma.collections) - Data structures
 
 ---
 
 ## Notes
 
-### Adding Items
+### Item ID Conventions
+- `F-XX` - Features (new functionality)
+- `I-XX` - Ideas (exploration, future concepts)
+- `DT-XX` - Design Trade-offs (intentional decisions)
+- `KI-XX` - Known Issues (tracked bugs/limitations)
 
-- `TD-XX` for technical debt
-- `F-XX` for features  
-- `I-XX` for ideas
-- `DT-XX` for design trade-offs
-- `KI-XX` for known issues
+### Updating Roadmap
+After each phase:
+1. Mark completed items with ✅
+2. Update status in issue tracker
+3. Reassess priorities based on blockers/discoveries
+4. Add new items as needed
 
-### Updating Priorities
+---
 
-After each release:
-1. Review what shipped
-2. Evaluate remaining items
-3. Consider new inputs (bugs, user feedback, ideas)
-4. Reorder the backlog
-5. Pick next 2-3 items
+**Last Updated:** March 8, 2026  
+**Current Milestone:** v0.2.1 (Frame Support - Phase 1 Complete ✅)  
+**Next Milestone:** v0.2.2 - Thread-Friendly Architecture & Multi-Slab Frames
+

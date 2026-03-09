@@ -1,0 +1,313 @@
+#!/bin/bash
+# Local Test Runner for Sigma.Memory
+# Handles tests in subdirectories (unit/, integration/, performance/, stress/, validation/)
+# Usage: ./rtest <test_spec> [options]
+# e.g., ./rtest nodepool_growth
+#       ./rtest unit/nodepool_growth --valgrind
+#       ./rtest unit
+
+set -e
+
+# Source configuration
+if [ -f "./config.sh" ]; then
+    source ./config.sh
+fi
+
+# Set build directories (from config or defaults)
+BUILD_DIR=${BUILD_DIR:-build}
+TST_BUILD_DIR="${BUILD_DIR}/test"
+SRC_DIR=${SRC_DIR:-src}
+TEST_DIR=${TEST_DIR:-test}
+
+# Supported test subdirectories
+TEST_SUBDIRS=("unit" "integration" "performance" "stress" "validation")
+
+# Parse arguments
+USE_VALGRIND=false
+SHOW_HELP=false
+test_spec=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --valgrind)
+            USE_VALGRIND=true
+            shift
+            ;;
+        --help|-h)
+            SHOW_HELP=true
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo "Usage: $0 <test_spec> [--valgrind] [--help]"
+            exit 1
+            ;;
+        *)
+            if [ -z "$test_spec" ]; then
+                test_spec="$1"
+            else
+                echo "Multiple test specs specified. Usage: $0 <test_spec> [--valgrind] [--help]"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Show help if requested
+if [ "$SHOW_HELP" = true ]; then
+    echo "Sigma.Memory Test Runner (rtest)"
+    echo ""
+    echo "Usage: rtest <test_spec> [options]"
+    echo ""
+    echo "Test Specification:"
+    echo "  test_name              Run specific test (searches all subdirs)"
+    echo "  subdir/test_name       Run specific test in subdirectory"
+    echo "  subdir                 Run all tests in subdirectory"
+    echo ""
+    echo "Options:"
+    echo "  --valgrind    Run test(s) with valgrind memory checker"
+    echo "  --help, -h    Show this help message"
+    echo ""
+    echo "Supported subdirectories:"
+    echo "  - unit/"
+    echo "  - integration/"
+    echo "  - performance/"
+    echo "  - stress/"
+    echo "  - validation/"
+    echo ""
+    echo "Examples:"
+    echo "  rtest nodepool_growth              # Run test_nodepool_growth (searches all dirs)"
+    echo "  rtest unit/nodepool_growth         # Run test/unit/test_nodepool_growth.c"
+    echo "  rtest unit                         # Run all tests in test/unit/"
+    echo "  rtest unit --valgrind              # Run all unit tests with valgrind"
+    exit 0
+fi
+
+# Check if test spec was provided
+if [ -z "$test_spec" ]; then
+    echo "Usage: $0 <test_spec> [--valgrind] [--help]"
+    echo "e.g., $0 nodepool_growth"
+    echo "     $0 unit/nodepool_growth --valgrind"
+    echo "     $0 unit"
+    exit 1
+fi
+
+# Compile library objects once
+compile_library_objects() {
+    SOURCES=("$SRC_DIR"/*.c)
+    OBJECTS=()
+    
+    for src in "${SOURCES[@]}"; do
+        obj="${src/$SRC_DIR/$BUILD_DIR}"
+        obj="${obj%.c}.o"
+        
+        # Check if recompile is needed
+        if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+            echo "Compiling $src -> $obj"
+            mkdir -p "$BUILD_DIR"
+            ${CC:-gcc} ${CFLAGS:--Wall -Wextra -g -fPIC -I./include} -c "$src" -o "$obj"
+        fi
+        
+        OBJECTS+=("$obj")
+    done
+}
+
+# Compile and run a single test
+# Args: test_basename subdir
+compile_and_run_test() {
+    local test_basename="$1"
+    local subdir="$2"
+    
+    local test_src="$TEST_DIR/$subdir/test_${test_basename}.c"
+    
+    if [ ! -f "$test_src" ]; then
+        echo "ERROR: Test source not found: $test_src"
+        return 1
+    fi
+    
+    echo "Found test: $test_src"
+    
+    # Compile test
+    local test_obj="${TST_BUILD_DIR}/test_${test_basename}.o"
+    mkdir -p "$TST_BUILD_DIR"
+    
+    if [ ! -f "$test_obj" ] || [ "$test_src" -nt "$test_obj" ]; then
+        echo "Compiling test: $test_src"
+        ${CC:-gcc} ${TST_CFLAGS:--Wall -Wextra -g -I./include -I/usr/local/include/sigma.test} -c "$test_src" -o "$test_obj"
+    fi
+    
+    # Link test executable
+    local exe="${TST_BUILD_DIR}/test_${test_basename}"
+    
+    local needs_relink=false
+    if [ ! -f "$exe" ]; then
+        needs_relink=true
+    fi
+    
+    for obj in "${OBJECTS[@]}"; do
+        if [ "$obj" -nt "$exe" ]; then
+            needs_relink=true
+            break
+        fi
+    done
+    
+    if [ "$needs_relink" = true ] || [ "$test_obj" -nt "$exe" ]; then
+        echo "Linking test: $exe"
+        # Add required libraries
+        local extra_libs=""
+        if [ ${#REQUIRES[@]} -gt 0 ]; then
+            for req in "${REQUIRES[@]}"; do
+                extra_libs="$extra_libs -l${req}"
+            done
+        fi
+        ${CC:-gcc} "$test_obj" "${OBJECTS[@]}" ${TST_LDFLAGS:--lstest -L/usr/lib} $extra_libs -o "$exe"
+    fi
+    
+    echo ""
+    echo "=== Running test_${test_basename} ($subdir) ==="
+    echo ""
+    
+    # Run test with appropriate options
+    if [ "$USE_VALGRIND" = true ] && [ "${VALGRIND_ENABLED:-true}" = true ]; then
+        echo "Running with valgrind..."
+        valgrind ${VALGRIND_OPTS:---leak-check=full --show-leak-kinds=all --track-origins=yes} "$exe"
+    else
+        "$exe"
+    fi
+    
+    echo ""
+    echo "=== Test complete ==="
+    echo ""
+}
+
+# Run all tests in a subdirectory
+# Args: subdir
+run_all_tests_in_dir() {
+    local subdir="$1"
+    local test_dir_path="$TEST_DIR/$subdir"
+    
+    if [ ! -d "$test_dir_path" ]; then
+        echo "ERROR: Test directory not found: $test_dir_path"
+        exit 1
+    fi
+    
+    # Find all test_*.c files
+    local test_files=("$test_dir_path"/test_*.c)
+    
+    if [ ! -f "${test_files[0]}" ]; then
+        echo "No tests found in $test_dir_path"
+        exit 1
+    fi
+    
+    local total_tests=0
+    local passed_tests=0
+    local failed_tests=0
+    
+    echo "========================================"
+    echo "Running all tests in $subdir/"
+    echo "========================================"
+    echo ""
+    
+    for test_file in "${test_files[@]}"; do
+        # Extract test basename (remove path and test_ prefix and .c suffix)
+        local filename=$(basename "$test_file")
+        local test_basename="${filename#test_}"
+        test_basename="${test_basename%.c}"
+        
+        total_tests=$((total_tests + 1))
+        
+        # Temporarily disable exit on error for test execution
+        set +e
+        compile_and_run_test "$test_basename" "$subdir"
+        local test_result=$?
+        set -e
+        
+        if [ $test_result -eq 0 ]; then
+            passed_tests=$((passed_tests + 1))
+        else
+            failed_tests=$((failed_tests + 1))
+            echo "FAILED: test_${test_basename} (exit code: $test_result)"
+            echo ""
+        fi
+    done
+    
+    echo "========================================"
+    echo "Test Suite Summary ($subdir/)"
+    echo "========================================"
+    echo "Total:  $total_tests"
+    echo "Passed: $passed_tests"
+    echo "Failed: $failed_tests"
+    echo ""
+    
+    # Return non-zero if any tests failed
+    if [ $failed_tests -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Compile library objects first
+compile_library_objects
+
+# Parse test specification
+if [[ "$test_spec" == */* ]]; then
+    # Contains slash: split into subdir/test_name
+    subdir="${test_spec%%/*}"
+    test_basename="${test_spec#*/}"
+    
+    # Remove trailing slash if present
+    test_basename="${test_basename%/}"
+    
+    # Validate subdir
+    if [[ ! " ${TEST_SUBDIRS[@]} " =~ " ${subdir} " ]]; then
+        echo "ERROR: Unknown subdirectory: $subdir"
+        echo "Supported: ${TEST_SUBDIRS[*]}"
+        exit 1
+    fi
+    
+    if [ -z "$test_basename" ]; then
+        # No test name after slash: run all tests in directory
+        set +e
+        run_all_tests_in_dir "$subdir"
+        exit $?
+    else
+        # Specific test in specific subdir
+        compile_and_run_test "$test_basename" "$subdir"
+    fi
+else
+    # No slash: check if it's a subdir name or test name
+    if [[ " ${TEST_SUBDIRS[@]} " =~ " ${test_spec} " ]]; then
+        # It's a subdirectory: run all tests
+        set +e
+        run_all_tests_in_dir "$test_spec"
+        exit $?
+    else
+        # It's a test name: search for it in all subdirs
+        test_found=false
+        
+        for subdir in "${TEST_SUBDIRS[@]}"; do
+            test_src="$TEST_DIR/$subdir/test_${test_spec}.c"
+            if [ -f "$test_src" ]; then
+                compile_and_run_test "$test_spec" "$subdir"
+                test_found=true
+                break
+            fi
+        done
+        
+        # Fallback: check root test directory
+        if [ "$test_found" = false ]; then
+            test_src="$TEST_DIR/test_${test_spec}.c"
+            if [ -f "$test_src" ]; then
+                compile_and_run_test "$test_spec" "."
+                test_found=true
+            fi
+        fi
+        
+        if [ "$test_found" = false ]; then
+            echo "ERROR: Test not found: test_${test_spec}.c"
+            echo "Searched in: test/{unit,integration,performance,stress,validation}/"
+            exit 1
+        fi
+    fi
+fi

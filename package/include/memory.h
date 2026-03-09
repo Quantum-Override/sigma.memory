@@ -27,7 +27,7 @@
 
 #pragma once
 
-#include "sigma.core/types.h"
+#include <sigma.core/types.h>
 
 #if 1  // Region: Scope & SLB Definitions
 // Scope configurations
@@ -67,6 +67,12 @@ typedef struct sc_allocator_i {
     object (*alloc)(usize size);
     void (*dispose)(object ptr);
     sc_allocator_scope_i Scope;
+    
+    // Frame operations (v0.2.1)
+    frame (*frame_begin)(void);
+    integer (*frame_end)(frame f);
+    usize (*frame_depth)(void);
+    usize (*frame_allocated)(frame f);
 } sc_allocator_i;
 extern const sc_allocator_i Allocator;
 #endif
