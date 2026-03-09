@@ -45,6 +45,7 @@ static bool node_pool_is_initialized(void);
 static void set_pool_base(addr base);
 static addr get_pool_base(void);
 static void init_free_list(void);
+static void btree_purge_recursive(scope scope_ptr, node_idx current_idx);
 
 // NodePool state (file-local static variables)
 static addr s_pool_base = ADDR_EMPTY;          // Base address of NodePool
@@ -413,6 +414,15 @@ node_idx nodepool_alloc_btree_node(scope scope_ptr) {
 
     nodepool_header *header = (nodepool_header *)scope_ptr->nodepool_base;
 
+    // Check recycled free list first — O(1) alloc path
+    if (header->btree_free_head != NODE_NULL) {
+        node_idx idx = (node_idx)header->btree_free_head;
+        btree_node node = nodepool_get_btree_node(scope_ptr, idx);
+        header->btree_free_head = (node != NULL) ? node->left_idx : NODE_NULL;
+        if (node != NULL) memset(node, 0, sizeof(sc_node));
+        return idx;
+    }
+
     // Check for collision with page nodes growing up
     usize next_btree_offset = header->btree_alloc_offset - sizeof(sc_node);
     if (next_btree_offset <= header->page_alloc_offset) {
@@ -469,6 +479,23 @@ node_idx nodepool_alloc_btree_node(scope scope_ptr) {
     }
 
     return (node_idx)idx;
+}
+
+/**
+ * @brief Free a btree_node back to the per-scope NodePool free list
+ */
+void nodepool_free_btree_node(scope scope_ptr, node_idx idx) {
+    if (scope_ptr == NULL || scope_ptr->nodepool_base == ADDR_EMPTY || idx == NODE_NULL) {
+        return;
+    }
+    nodepool_header *header = (nodepool_header *)scope_ptr->nodepool_base;
+    btree_node node = nodepool_get_btree_node(scope_ptr, idx);
+    if (node == NULL) {
+        return;
+    }
+    // Reuse left_idx as free-list next pointer
+    node->left_idx = header->btree_free_head;
+    header->btree_free_head = (uint16_t)idx;
 }
 
 /**
@@ -740,8 +767,9 @@ int skiplist_find_containing(scope scope_ptr, addr address, uint16_t *page_idx_o
  * @param page_idx_out Output: index of suitable page_node
  * @return OK if found, ERR if no suitable page
  *
- * Strategy: First-fit - scan skip list level 0 for first page with space
- * Future optimization: Track max_free per page for O(log n) search
+ * Strategy: scan skip list level 0; accept a page only if it can actually
+ * serve 'size' — either via a tracked free block (B-tree) or remaining
+ * bump space.  Replaces the old block_count heuristic (Task 7).
  */
 int skiplist_find_for_size(scope scope_ptr, usize size, uint16_t *page_idx_out) {
     if (scope_ptr == NULL || scope_ptr->nodepool_base == ADDR_EMPTY || page_idx_out == NULL) {
@@ -753,23 +781,28 @@ int skiplist_find_for_size(scope scope_ptr, usize size, uint16_t *page_idx_out) 
         return ERR;
     }
 
-    // TODO (Task 7): Use size parameter for smarter page selection
-    (void)size;  // Suppress warning - will use after B-tree integration
-
-    // Scan level 0 (full list) for page with space
+    // Scan level 0 (full list); verify each candidate can serve 'size'
     uint16_t current_idx = header->skip_list_head;
 
     while (current_idx != PAGE_NODE_NULL) {
         page_node *current = nodepool_get_page_node(scope_ptr, current_idx);
         if (current == NULL) return ERR;
 
-        // Check if page has room
-        // TODO (Task 7): Query per-page B-tree for max_free
-        // For now, simple heuristic: if block_count < max blocks per page
-        usize max_blocks_per_page = SYS0_PAGE_SIZE / 32;  // Conservative estimate
-        if (current->block_count < max_blocks_per_page) {
+        // Check 1: a tracked free block >= size exists in the page B-tree
+        if (btree_page_find_free(scope_ptr, current_idx, size, NULL) == OK) {
             *page_idx_out = current_idx;
             return OK;
+        }
+
+        // Check 2: remaining bump space >= size
+        page_sentinel ps = (page_sentinel)current->page_base;
+        if (ps != NULL) {
+            addr page_end  = current->page_base + SYS0_PAGE_SIZE;
+            addr bump_ptr  = current->page_base + ps->bump_offset;
+            if (page_end > bump_ptr && (page_end - bump_ptr) >= size) {
+                *page_idx_out = current_idx;
+                return OK;
+            }
         }
 
         current_idx = current->forward[0];  // Next at level 0
@@ -919,6 +952,14 @@ int btree_page_insert(scope scope_ptr, uint16_t page_idx, addr start, usize leng
         return ERR;  // Pool exhausted
     }
 
+    // Re-fetch page_node: nodepool_alloc_btree_node may have called mremap (MREMAP_MAYMOVE),
+    // which can relocate the nodepool and invalidate any pointer computed before this call.
+    page = nodepool_get_page_node(scope_ptr, page_idx);
+    if (page == NULL) {
+        nodepool_free_btree_node(scope_ptr, new_idx);
+        return ERR;
+    }
+
     // Initialize node
     btree_node new_node = nodepool_get_btree_node(scope_ptr, new_idx);
     if (new_node == NULL) {
@@ -946,7 +987,7 @@ int btree_page_insert(scope scope_ptr, uint16_t page_idx, addr start, usize leng
     // Insert into non-empty tree using BST insertion
     int result = btree_insert_recursive(scope_ptr, page->btree_root, new_idx);
     if (result != OK) {
-        // TODO: Free the allocated node back to pool
+        nodepool_free_btree_node(scope_ptr, new_idx);  // reclaim on insert failure
         return ERR;
     }
 
@@ -1368,5 +1409,42 @@ int btree_page_find_free(scope scope_ptr, uint16_t page_idx, usize size, node_id
         *out_node_idx = best_idx;
     }
 
+    return OK;
+}
+
+// ============================================================================
+// B-Tree Page Purge (node reclamation for empty page release)
+// ============================================================================
+
+/**
+ * @brief Recursively walk a B-tree and return every node to the free list
+ */
+static void btree_purge_recursive(scope scope_ptr, node_idx current_idx) {
+    if (current_idx == NODE_NULL) {
+        return;
+    }
+    btree_node node = nodepool_get_btree_node(scope_ptr, current_idx);
+    if (node == NULL) {
+        return;
+    }
+    // Capture children before overwriting left_idx with free-list chain
+    node_idx left  = node->left_idx;
+    node_idx right = node->right_idx;
+    nodepool_free_btree_node(scope_ptr, current_idx);
+    btree_purge_recursive(scope_ptr, left);
+    btree_purge_recursive(scope_ptr, right);
+}
+
+/**
+ * @brief Purge all B-tree nodes for a page and return them to the free list
+ */
+int btree_page_purge(scope scope_ptr, uint16_t page_idx) {
+    page_node *page = nodepool_get_page_node(scope_ptr, page_idx);
+    if (page == NULL) {
+        return ERR;
+    }
+    btree_purge_recursive(scope_ptr, page->btree_root);
+    page->btree_root  = NODE_NULL;
+    page->block_count = 0;
     return OK;
 }

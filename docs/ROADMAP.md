@@ -1,8 +1,36 @@
 # SigmaCore Memory - Roadmap
 
-**Current Version:** 0.2.2-arenas (Arena System + Dynamic NodePool Growth) ✅  
-**Last Updated:** March 8, 2026  
+**Current Version:** 0.2.3-realloc (Realloc API + Dynamic Page Release + Skip List Fix) ✅  
+**Last Updated:** March 9, 2026  
 **Branch:** main
+
+---
+
+## v0.2.3-realloc - Realloc, Page Release & Skip List Correctness ✅ COMPLETE
+
+**Status:** ✅ Implementation complete, 35/35 tests passing, 0 bytes leaked
+
+**Key Features:**
+- ✅ `Allocator.realloc(ptr, size)` — in-place shrink or alloc+copy+dispose grow
+- ✅ SLB0 dynamic page release — munmap fully-empty dynamic pages on dispose
+- ✅ Skip list correctness fix — fragmented pages not returned for large requests
+- ✅ Bug fix: `btree_page_insert` stale pointer after `mremap(MREMAP_MAYMOVE)`
+- ✅ Bug fix: `slb0_dispose` page chain dangling `next_page_off` after munmap
+- ✅ 3 new unit test suites: `test_realloc` (8), `test_page_release` (5), `test_skiplist_correctness` (4)
+
+**Bug Details:**
+- `btree_page_insert`: held `page_node *page` across `nodepool_alloc_btree_node` which may call `mremap(MREMAP_MAYMOVE)`. Fix: re-fetch page pointer after the alloc call.
+- `slb0_dispose`: when munmap'ing a freed dynamic page, the predecessor's `next_page_off` was left pointing to unmapped memory. Fix: unlink from page chain before munmap.
+
+**Test Suites Added:**
+- `test/unit/test_realloc.c` — REA-01..08: NULL→alloc, NULL+0, zero-size dispose, shrink, grow+data, grow→shrink, split threshold, independent chains
+- `test/unit/test_page_release.c` — PRL-01..05: initial pages, dynamic overflow, page release on empty, baseline stability, post-release usability
+- `test/unit/test_skiplist_correctness.c` — SLC-01..04: B-tree reuse, coalesced free, Task 7 regression guard, full-cycle re-alloc
+
+**Documentation:**
+- ✅ USERS_GUIDE.md: `Allocator.realloc` added to API table
+- ✅ MEMORY_REFERENCE.md: `Allocator.realloc` added to API quick-reference
+- ✅ All tests validated under valgrind, 0 bytes leaked
 
 ---
 

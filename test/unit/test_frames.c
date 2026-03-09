@@ -134,28 +134,32 @@ void test_frame_max_depth(void) {
 }
 
 void test_frame_depth_tracking(void) {
-    // Arrange & Act: Create nested frames
+    // Arrange & Act: single-frame-per-scope model (v0.2.3)
+    // First frame succeeds; attempt to open a second while first is active returns NULL
     frame f1 = Allocator.frame_begin();
     Assert.isNotNull(f1, "First frame should succeed");
-    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1 after first begin");
 
+    // Attempt to open a second frame while f1 is active
     frame f2 = Allocator.frame_begin();
-    Assert.isNotNull(f2, "Second frame should succeed");
-    Assert.isTrue(Allocator.frame_depth() == 2, "Depth should be 2");
+    Assert.isNull(f2, "Second frame_begin() while active should return NULL");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should remain 1 (no nesting)");
 
+    // Attempt a third — same result
     frame f3 = Allocator.frame_begin();
-    Assert.isNotNull(f3, "Third frame should succeed");
-    Assert.isTrue(Allocator.frame_depth() == 3, "Depth should be 3");
+    Assert.isNull(f3, "Third frame_begin() while active should return NULL");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should still be 1");
 
-    // Act: End middle frame (LIFO order matters, but we test inner first)
-    Allocator.frame_end(f3);
-    Assert.isTrue(Allocator.frame_depth() == 2, "Depth should be 2 after ending f3");
-
-    Allocator.frame_end(f2);
-    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1 after ending f2");
-
+    // End the one active frame
     Allocator.frame_end(f1);
     Assert.isTrue(Allocator.frame_depth() == 0, "Depth should be 0 after ending f1");
+
+    // Sequential second frame succeeds after first is closed
+    frame f4 = Allocator.frame_begin();
+    Assert.isNotNull(f4, "Sequential frame after close should succeed");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1 for sequential frame");
+    Allocator.frame_end(f4);
+    Assert.isTrue(Allocator.frame_depth() == 0, "Depth should be 0 after ending f4");
 }
 #endif
 
@@ -249,38 +253,42 @@ void test_frame_boundary_allocations(void) {
 #endif
 
 #if 1  // Region: TDD Phase 3 - Nesting Stress & Mixed Allocations
-void test_frame_deep_nesting_with_allocations(void) {
-    // Arrange: Create deeply nested frames (8 levels) with allocations in each
-    frame frames[8];
-
-    // Act: Create nested frames, each with allocations
+void test_frame_sequential_with_allocations(void) {
+    // v0.2.3: single-frame-per-scope; verify 8 sequential frames each with allocations
     for (int i = 0; i < 8; i++) {
-        frames[i] = Allocator.frame_begin();
-        Assert.isNotNull(frames[i], "Frame #%d should succeed", i + 1);
+        frame f = Allocator.frame_begin();
+        Assert.isNotNull(f, "Sequential frame #%d should succeed", i + 1);
+        Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1 for frame #%d", i + 1);
 
-        // Allocate incrementally larger amounts
         object ptr = Allocator.alloc(128 * (i + 1));
         Assert.isNotNull(ptr, "Allocation in frame #%d should succeed", i + 1);
+
+        usize allocated = Allocator.frame_allocated(f);
+        Assert.isTrue(allocated >= (usize)(128 * (i + 1)),
+                      "Frame #%d should track allocation, got %zu", i + 1, allocated);
+
+        integer result = Allocator.frame_end(f);
+        Assert.isTrue(result == OK, "Ending frame #%d should succeed", i + 1);
+        Assert.isTrue(Allocator.frame_depth() == 0, "Depth 0 after frame #%d ends", i + 1);
     }
 
-    Assert.isTrue(Allocator.frame_depth() == 8, "Depth should be 8");
-
-    // Cleanup: Unwind in LIFO order
-    for (int i = 7; i >= 0; i--) {
-        integer result = Allocator.frame_end(frames[i]);
-        Assert.isTrue(result == OK, "Unwinding frame #%d should succeed", i + 1);
-    }
-
-    Assert.isTrue(Allocator.frame_depth() == 0, "All frames should be unwound");
+    // Verify that attempting a second begin() while one is active still returns NULL
+    frame f1 = Allocator.frame_begin();
+    Assert.isNotNull(f1, "Frame should open normally");
+    frame f2 = Allocator.frame_begin();
+    Assert.isNull(f2, "Duplicate begin() should return NULL");
+    Allocator.frame_end(f1);
+    Assert.isTrue(Allocator.frame_depth() == 0, "Depth should be 0 after cleanup");
 }
 
 void test_frame_mixed_normal_and_frame_allocations(void) {
-    // Arrange: Interleave normal and frame allocations
+    // v0.2.3: interleave normal and frame allocations; single frame per scope
     object normal1 = Allocator.alloc(256);
     Assert.isNotNull(normal1, "Normal allocation 1 should succeed");
 
     frame f1 = Allocator.frame_begin();
     Assert.isNotNull(f1, "Frame 1 should succeed");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1");
 
     object frame1_ptr = Allocator.alloc(512);
     Assert.isNotNull(frame1_ptr, "Frame 1 allocation should succeed");
@@ -288,49 +296,51 @@ void test_frame_mixed_normal_and_frame_allocations(void) {
     object frame1_ptr2 = Allocator.alloc(128);
     Assert.isNotNull(frame1_ptr2, "Frame 1 allocation 2 should succeed");
 
+    // Second begin() while f1 active returns NULL (single-frame model)
     frame f2 = Allocator.frame_begin();
-    Assert.isNotNull(f2, "Frame 2 should succeed");
+    Assert.isNull(f2, "Nested frame_begin() while f1 active should return NULL");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should remain 1");
 
+    // End f1 — frees frame1_ptr and frame1_ptr2
+    Allocator.frame_end(f1);
+    Assert.isTrue(Allocator.frame_depth() == 0, "Depth should be 0 after f1 ends");
+
+    // Sequential second frame succeeds
+    frame f2_seq = Allocator.frame_begin();
+    Assert.isNotNull(f2_seq, "Sequential frame 2 should succeed");
     object frame2_ptr = Allocator.alloc(1024);
     Assert.isNotNull(frame2_ptr, "Frame 2 allocation should succeed");
-
-    // Cleanup frames (LIFO) - frees frame1_ptr, frame1_ptr2, frame2_ptr
-    Allocator.frame_end(f2);
-    Allocator.frame_end(f1);
+    Allocator.frame_end(f2_seq);
 
     // Normal allocations should still work after frames
     object normal2 = Allocator.alloc(64);
     Assert.isNotNull(normal2, "Normal allocation after frames should succeed");
 
-    // Cleanup normal allocations (only those allocated outside frames)
     Allocator.dispose(normal2);
     Allocator.dispose(normal1);
 }
 
 void test_frame_allocation_isolation(void) {
-    // Verify that frame allocations don't interfere with each other
+    // v0.2.3: sequential frames have independent allocation counters
+    // Frame 1: 256 + 512 = 768 bytes
     frame f1 = Allocator.frame_begin();
-    object f1_ptr1 = Allocator.alloc(256);
-    object f1_ptr2 = Allocator.alloc(512);
-
-    frame f2 = Allocator.frame_begin();
-    object f2_ptr1 = Allocator.alloc(1024);
-    object f2_ptr2 = Allocator.alloc(128);
-
-    // Both frames should have independent allocations
+    Assert.isNotNull(f1, "Frame 1 should succeed");
+    Allocator.alloc(256);
+    Allocator.alloc(512);
     usize f1_alloc = Allocator.frame_allocated(f1);
-    usize f2_alloc = Allocator.frame_allocated(f2);
-
-    Assert.isTrue(f1_alloc >= 768, "Frame 1 should show at least 768 bytes");
-    Assert.isTrue(f2_alloc >= 1152, "Frame 2 should show at least 1152 bytes");
-
-    // End inner frame
-    Allocator.frame_end(f2);
-
-    // Outer frame allocations should still be valid
-    Assert.isTrue(Allocator.frame_allocated(f1) >= 768, "Frame 1 still intact");
-
+    Assert.isTrue(f1_alloc >= 768, "Frame 1 should show at least 768 bytes, got %zu", f1_alloc);
     Allocator.frame_end(f1);
+    Assert.isTrue(Allocator.frame_depth() == 0, "Depth should be 0 after f1");
+
+    // Frame 2: 1024 + 128 = 1152 bytes (independent counter, starts fresh)
+    frame f2 = Allocator.frame_begin();
+    Assert.isNotNull(f2, "Frame 2 should succeed after f1 closed");
+    Allocator.alloc(1024);
+    Allocator.alloc(128);
+    usize f2_alloc = Allocator.frame_allocated(f2);
+    Assert.isTrue(f2_alloc >= 1152, "Frame 2 should show at least 1152 bytes, got %zu", f2_alloc);
+    Allocator.frame_end(f2);
+    Assert.isTrue(Allocator.frame_depth() == 0, "Depth should be 0 after f2");
 }
 
 void test_frame_stress_many_small_allocations(void) {
@@ -424,7 +434,7 @@ __attribute__((constructor)) void init_frame_tests(void) {
     testcase("Frame: boundary allocations", test_frame_boundary_allocations);
 
     // Phase 3: Nesting stress & mixed allocations
-    testcase("Frame: deep nesting with allocations", test_frame_deep_nesting_with_allocations);
+    testcase("Frame: sequential frames with allocations", test_frame_sequential_with_allocations);
     testcase("Frame: mixed normal and frame allocations",
              test_frame_mixed_normal_and_frame_allocations);
     testcase("Frame: allocation isolation", test_frame_allocation_isolation);

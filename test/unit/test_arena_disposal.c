@@ -109,54 +109,48 @@ void test_ads_02_dispose_multiple_arenas(void) {
 }
 
 /**
- * ADS-03: Dispose arena with active frames
- * Verify: Frames are cleaned up automatically, no crashes
+ * ADS-03: Dispose arena with active frame
+ * Verify: Active frame is auto-cleaned on disposal; no crashes; single-frame model enforced
  */
 void test_ads_03_dispose_with_active_frames(void) {
-    fprintf(stdout, "\n=== ADS-03: Dispose Arena with Active Frames ===\n");
+    fprintf(stdout, "\n=== ADS-03: Dispose Arena with Active Frame ===\n");
     
-    // Create arena
+    // Create arena and activate it
     scope s = Allocator.create_arena("frame_test", SCOPE_POLICY_RECLAIMING);
     Assert.isNotNull(s, "Arena should create");
+    fprintf(stdout, "  Created arena: id=%lu\n", s->scope_id);
     
-    fprintf(stdout, "  Created arena: id=%u\n", s->scope_id);
-    
-    // Switch to this arena
+    // Scope.set activates the arena and stores the previous scope in prev chain
     Allocator.Scope.set(s);
     
-    // Create nested frames
-    fprintf(stdout, "  Creating nested frames...\n");
+    // Open one frame (single-frame-per-scope model, v0.2.3)
+    fprintf(stdout, "  Opening frame...\n");
     frame f1 = Allocator.frame_begin();
     Assert.isNotNull(f1, "Frame 1 should create");
     fprintf(stdout, "    Frame 1 created, depth=%zu\n", Allocator.frame_depth());
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should be 1");
     
     Allocator.alloc(256);
     
+    // Attempt a second frame while f1 is active — must return NULL
     frame f2 = Allocator.frame_begin();
-    Assert.isNotNull(f2, "Frame 2 should create");
-    fprintf(stdout, "    Frame 2 created, depth=%zu\n", Allocator.frame_depth());
+    Assert.isNull(f2, "Frame 2 should return NULL (single-frame model)");
+    fprintf(stdout, "    Duplicate frame_begin() returned NULL as expected\n");
+    Assert.isTrue(Allocator.frame_depth() == 1, "Depth should remain 1");
     
     Allocator.alloc(512);
     
-    frame f3 = Allocator.frame_begin();
-    Assert.isNotNull(f3, "Frame 3 should create");
-    fprintf(stdout, "    Frame 3 created, depth=%zu\n", Allocator.frame_depth());
+    fprintf(stdout, "  Frame depth before disposal: %zu\n", Allocator.frame_depth());
     
-    Allocator.alloc(1024);
+    // Restore to SLB0 via the prev-chain (safe — does not corrupt SLB0->prev)
+    Allocator.Scope.restore();
     
-    fprintf(stdout, "  Final frame depth: %zu\n", Allocator.frame_depth());
-    
-    // Switch back to SLB0 BEFORE disposing arena
-    scope slb0 = Memory.get_scope(1);
-    Allocator.Scope.set(slb0);
-    
-    // Dispose arena WITHOUT ending frames (should auto-cleanup)
-    fprintf(stdout, "  Disposing arena with 3 active frames...\n");
+    // Dispose arena WITHOUT ending frame (auto-cleanup)
+    fprintf(stdout, "  Disposing arena with 1 active frame...\n");
     Allocator.dispose_arena(s);
     
     fprintf(stdout, "  ✓ Arena disposed without crashes\n");
-    
-    // Note: Frames are cleaned up by NodePool shutdown
+    Assert.isTrue(Allocator.frame_depth() == 0, "SLB0 frame depth should be 0 after disposal");
 }
 
 /**

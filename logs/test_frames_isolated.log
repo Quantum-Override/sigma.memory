@@ -1,5 +1,5 @@
-[2] Frame Isolation Debug     :    1 : 2026-03-08  15:18:58                     
+[2] Frame Isolation Debug     :    1 : 2026-03-09  14:01:46                     
 ================================================================================
-Running: Deep nesting isolated                                  62.305 ms [PASS]
+Running: Sequential frame isolation (8 rounds)               28842.569 ms [PASS]
 ================================================================================
 [2]     TESTS=  1        PASS=  1        FAIL=  0        SKIP=  0

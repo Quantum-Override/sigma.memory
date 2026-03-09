@@ -95,41 +95,39 @@ void test_aal_02_multiple_arena_allocations(void) {
 }
 
 /**
- * AAL-03: Arena allocation with current scope
- * Verify: Can switch to arena and use Allocator.alloc()
+ * AAL-03: Arena allocation with current scope (v0.2.3)
+ * Verify: create_arena auto-activates (R7 = arena); restore returns to SLB0
  */
 void test_aal_03_arena_current_scope_allocation(void) {
     fprintf(stdout, "\n=== AAL-03: Arena as Current Scope ===\n");
-    
+
+    // Save SLB0 before creating arena
+    scope slb0 = Memory.get_scope(1);
+
+    // create_arena automatically activates: R7 = arena, arena->prev = SLB0
     scope arena = Allocator.create_arena("current_scope", SCOPE_POLICY_RECLAIMING);
     Assert.isNotNull(arena, "Arena should create");
-    
-    // Save SLB0 for later
-    scope slb0 = Memory.get_scope(1);
-    
-    // Switch to arena as current scope
-    fprintf(stdout, "  Switching to arena as current scope...\n");
-    bool set_ok = Allocator.Scope.set(arena);
-    Assert.isTrue(set_ok, "Should be able to set arena as current scope");
-    
+
     scope current = (scope)Allocator.Scope.current();
-    Assert.isTrue(current == arena, "Current scope should be arena");
-    fprintf(stdout, "  ✓ Arena is now current scope\n");
-    
-    // Allocate using Allocator.alloc (uses current scope)
+    Assert.isTrue(current == arena, "Arena should be current scope after create_arena");
+    fprintf(stdout, "  ✓ Arena is now current scope (auto-activated)\n");
+
+    // Allocate using Allocator.alloc (uses current scope = arena)
     fprintf(stdout, "  Allocating using Allocator.alloc()...\n");
     object ptr1 = Allocator.alloc(512);
     object ptr2 = Allocator.alloc(1024);
-    
+
     Assert.isNotNull(ptr1, "Allocation 1 should succeed");
     Assert.isNotNull(ptr2, "Allocation 2 should succeed");
     fprintf(stdout, "  ✓ Allocations succeeded in current arena\n");
-    
-    // Switch back to SLB0
-    Allocator.Scope.set(slb0);
-    fprintf(stdout, "  Switched back to SLB0\n");
-    
-    // Cleanup
+
+    // Scope.restore() unwinds to SLB0 (prev-chain) without corrupting SLB0->prev
+    Allocator.Scope.restore();
+    current = (scope)Allocator.Scope.current();
+    Assert.isTrue(current == slb0, "SLB0 should be current after Scope.restore()");
+    fprintf(stdout, "  ✓ Restored to SLB0\n");
+
+    // Cleanup (arena->prev already cleared by restore)
     Allocator.dispose_arena(arena);
 }
 

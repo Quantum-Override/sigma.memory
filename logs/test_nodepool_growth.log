@@ -1,7 +1,7 @@
-[2] NodePool:Growth prevents exhaustion_teardown :    3 : 2026-03-08  15:18:58  
+[2] NodePool:Growth prevents exhaustion_teardown :    3 : 2026-03-09  14:01:48  
 ================================================================================
-Running: NPP-01: Detect page_node exhaustion (baseline)         54.429 ms [PASS]
-Running: NPP-02: Automatic growth via mremap                    42.304 ms [PASS]
-Running: NPP-03: Multiple growth cycles                        182.915 ms [PASS]
+Running: NPP-01: Detect page_node exhaustion (baseline)       8352.188 ms [PASS]
+Running: NPP-02: Automatic growth via mremap                  2231.548 ms [PASS]
+Running: NPP-03: Multiple growth cycles                       6666.880 ms [PASS]
 ================================================================================
 [2]     TESTS=  3        PASS=  3        FAIL=  0        SKIP=  0

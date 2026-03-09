@@ -1967,6 +1967,149 @@ But more importantly:
 - **We proved** that "impossible" often means "uncomfortable"
 - **We built** something that doesn't compromise
 
+---
+
+## Chapter 9: Realloc, Dynamic Page Release & Bug Archaeology (v0.2.3)
+
+### The Situation
+
+**Date:** March 9, 2026  
+**Context:** All Phase 7 (skip list + per-page B-trees) work complete; writing new test suites to cover recently implemented features before release.  
+**Features covered:** `Allocator.realloc`, SLB0 dynamic page release on empty pages, Task 7 skip list correctness fix.
+
+The act of writing thorough tests — as always — uncovered bugs that had been dormant in production code.
+
+---
+
+### Feature 1: Allocator.realloc
+
+The `realloc` API was straightforward in concept but required careful boundary conditions:
+
+```
+NULL + size       → pure alloc (no copy needed)
+ptr + 0           → pure dispose (no new alloc)
+ptr + smaller     → in-place shrink (if remainder meets split threshold)
+ptr + larger      → alloc new + memcpy existing bytes + dispose old
+```
+
+**Key Insight:** The split threshold guard matters. If shrinking leaves a remainder smaller than the minimum tracked block, don't split — leave the tail as internal slack. This keeps the B-tree clean and avoids creating orphaned tiny free nodes that can never be filled.
+
+**Test suite:** `test_realloc.c`, 8 cases, 0 failures, 0 leaks under valgrind.
+
+---
+
+### Feature 2: SLB0 Dynamic Page Release
+
+SLB0 can grow beyond its initial 16 pages when allocation pressure demands it. These "dynamic" pages are individually `mmap`'d and should be returned to the OS when they become fully empty.
+
+The lifecycle is:
+1. All allocs on the page are freed → B-tree has one free node spanning the full page
+2. `slb0_dispose` detects: page is fully free AND was dynamically allocated
+3. `munmap` the page and decrement `page_count`
+
+Simple on paper. The bug hunt was not simple.
+
+---
+
+### Bug #1: Stale Pointer After mremap — The Silent Assassin
+
+**Where:** `btree_page_insert` in `src/node_pool.c`  
+**Trigger:** First time a test allocated enough objects to force NodePool growth during a `btree_page_insert` call.
+
+**The code that looked fine:**
+```c
+page_node *page = nodepool_get_page_node(scope_ptr, page_idx);
+// ...
+node_idx new_idx = nodepool_alloc_btree_node(scope_ptr);  // <-- can mremap!
+if (page->btree_root == NODE_NULL) {                       // <-- CRASH
+```
+
+**What happened:**  
+`nodepool_alloc_btree_node` may call `mremap(MREMAP_MAYMOVE)` to grow the NodePool. `MREMAP_MAYMOVE` means the kernel is allowed to move the entire mapping to a new virtual address. After the move, `page` — a raw pointer computed *before* the mremap — now points into unmapped memory. The `if (page->btree_root == ...)` dereference was a guaranteed SIGSEGV.
+
+**Why it was dormant for 15 test suites:**  
+No previous test allocated enough objects to trigger NodePool growth *within a single `btree_page_insert` call while the page pointer was live*. The bug required a very specific sequence: grow NodePool → mremap fires → old page pointer still held → immediate dereference.
+
+**Fix:** Re-fetch the page pointer after the potentially-remapping call:
+```c
+node_idx new_idx = nodepool_alloc_btree_node(scope_ptr);
+if (new_idx == NODE_NULL) return ERR;
+// Re-fetch: mremap(MREMAP_MAYMOVE) may have relocated the nodepool
+page = nodepool_get_page_node(scope_ptr, page_idx);
+if (page == NULL) { nodepool_free_btree_node(scope_ptr, new_idx); return ERR; }
+```
+
+**Lesson:** Any pointer into an `mremap`'d region is invalid after the call. Functions that *may* trigger mremap internally are particularly dangerous — the caller can't see the growth happen. The pattern "fetch pointer, call function, use pointer" is only safe if the function cannot remap the underlying memory.
+
+---
+
+### Bug #2: Page Chain Dangling Pointer — The Ghost in the List
+
+**Where:** `slb0_dispose` in `src/memory.c`  
+**Trigger:** After freeing the last allocation on a dynamic page (triggering `munmap`), the next allocation attempt walked the page chain and crashed reading freed memory.
+
+**The page chain model:**  
+SLB0 pages are linked via `page_sentinel.next_page_off`. The `fallback_bump` allocation path walks this chain looking for a page with free space. The `next_page_off` is an absolute address.
+
+**The original release code:**
+```c
+// Dynamic page detected as empty: release it
+munmap(page_ptr, SYS0_PAGE_SIZE);
+slb0->page_count--;
+// next_page_off of the predecessor still points here ← BUG
+```
+
+**What happened:**  
+The predecessor page's `next_page_off` still pointed at the now-unmapped address. The next allocation walked the chain, hit the stale pointer, and dereferenced unmapped memory → SIGSEGV.
+
+**Fix:** Unlink from the chain *before* unmapping:
+```c
+addr page_next = page->next_page_off;
+if (slb0->first_page_off == pn->page_base) {
+    slb0->first_page_off = page_next;
+} else {
+    page_sentinel prev = (page_sentinel)slb0->first_page_off;
+    while (prev != NULL && prev->next_page_off != pn->page_base)
+        prev = prev->next_page_off ? (page_sentinel)prev->next_page_off : NULL;
+    if (prev != NULL) prev->next_page_off = page_next;
+}
+munmap(page_ptr, SYS0_PAGE_SIZE);
+slb0->page_count--;
+```
+
+**Lesson:** When removing a node from a linked list *and* releasing its backing memory, always unlink first. After `munmap`, you cannot safely read anything from that page — including the `next_page_off` you need for unlinking. Sequence: save → unlink → release.
+
+---
+
+### The Valgrind Map Layout Surprise
+
+While testing `test_page_release.c`, we wrote address-based detection to identify which allocations landed on dynamic (overflow) pages:
+
+```c
+// Works natively: dynamic pages mmap'd above initial block
+#define dynamic_threshold(slb0) ((slb0)->first_page_off + 16u * SYS0_PAGE_SIZE)
+bool is_dynamic = (addr)ptr >= dynamic_threshold(slb0);
+```
+
+Under native execution this worked perfectly. Under valgrind it failed: valgrind assigns `mmap` addresses from a compact internal pool, and newly mmap'd pages could receive addresses *below* `first_page_off + 16 * SYS0_PAGE_SIZE`.
+
+**Fix:** Replace address-based overflow detection with `page_count`-based detection. `slb0->page_count` increases monotonically as new pages are mmap'd, regardless of where in virtual memory the kernel places them. This is portable across native, valgrind, ASAN, and any future memory tool.
+
+**Rule:** Never assume address ordering relationships between separately-mmap'd regions. Virtual address assignment is a kernel implementation detail, not a portable contract.
+
+---
+
+### Test Suite Results (v0.2.3)
+
+| Suite | Tests | Result | Valgrind |
+|-------|-------|--------|----------|
+| `test_realloc` | 8 | ✅ Pass | 0 leaks |
+| `test_page_release` | 5 | ✅ Pass | 0 leaks |
+| `test_skiplist_correctness` | 4 | ✅ Pass | 0 leaks |
+| **Total unit suite** | **35** | **✅ 35/35** | **0 leaks** |
+
+---
+
 ### For Future Readers
 
 If you're reading this to learn memory allocation:
@@ -1998,8 +2141,8 @@ Because that's where the learning lives.
 
 ---
 
-**Current Status:** v0.2.1-frames (March 8, 2026)  
-**Latest Update:** Chapter 8 - Frame Support Phase 1 Complete  
+**Current Status:** v0.2.3-realloc (March 9, 2026)  
+**Latest Update:** Chapter 9 - Realloc, Dynamic Page Release & Bug Archaeology  
 **Maintained By:** SigmaCore Development Team  
 **License:** MIT (Use freely, learn freely, question everything)
 
