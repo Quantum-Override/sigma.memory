@@ -33,8 +33,7 @@ data type` when building with `-Wextra` (e.g., via `cbuild lib`). The guard can 
 **What it solves:** Eliminates a dead guard, silences the warning, and prevents the function from
 silently accepting invalid index values with no bounds enforcement.
 
-**Fix:** Change `sbyte index` to `uint8_t index` (or add an explicit `(int8_t)` cast before
-comparison). Add `assert(index <= 7)` in debug builds.
+**Fix:** Change `sbyte index` to `byte index` (unsigned 8-bit, per `sigma.core/types.h`). Add `assert(index <= 7)` in debug builds.
 
 ---
 
@@ -50,9 +49,7 @@ This is a silent semantic mismatch.
 expect. Either enforce the constraint (return `NULL`/log error when `RECLAIMING` is passed to
 `create_arena`) or implement reclaiming arenas.
 
-**Fix options (choose one):**
-1. Short term: reject `SCOPE_POLICY_RECLAIMING` in `create_arena` (`return NULL`, log error).
-2. Long term: implement B-tree-tracked arenas for `RECLAIMING` policy (see FT-05).
+**Fix:** `create_arena(name, SCOPE_POLICY_RECLAIMING)` should create a `SlabAllocator` scope — B-tree-tracked, split/coalesce, individual dispose — essentially a named SLB0-equivalent. Arenas will **always** remain pure bump; `RECLAIMING` is the signal to create a user slab. See FT-05.
 
 ---
 
@@ -106,19 +103,30 @@ request handlers, parallel test runners).
   global lock.
 - Blocked on: Sigma.Tasking API stability.
 
+> ⚠️ **Sigma.Tasking is entering active planning.** Revisit this item as soon as Sigma.Tasking API design begins. Hook signatures must be co-designed with it.
+
 ---
 
-### FT-02 — `Allocator.calloc(count, size)` 🟠 High
+### FT-02 — `Allocator.alloc(size, bool zee)` — zero-init parameter 🟠 High
 
 **Problem:** There is no zero-initialising allocation primitive. Every caller that needs zeroed
 memory must call `Allocator.alloc` + `memset`, which is error-prone (forgetting `memset`),
 verbose, and misses potential OS-provided zero pages.
 
-**What it solves:** Reduces boilerplate; aligns with standard C allocator conventions; avoids
-unintentional use of uninitialised memory.
+**What it solves:** Reduces boilerplate; avoids unintentional use of uninitialised memory.
 
-**Implementation:** Thin wrapper over `alloc` + `memset`. For mmap'd pages the OS guarantees
-zero fill on new pages, so an optimised path could skip `memset` for fresh page allocations.
+**Design:** This parameter was present in early prototyping. Restore `bool zee` on `alloc`
+rather than adding a separate `calloc`. When `zee == true`, zero the allocation before returning.
+For fresh mmap'd pages the OS already zeroes them — an optimised path can skip `memset` in that
+case.
+
+```c
+object buf  = Allocator.alloc(256, false);  // existing behaviour
+object zbuf = Allocator.alloc(256, true);   // zeroed on return
+```
+
+> ⚠️ **Breaking change** — all existing `Allocator.alloc(size)` call sites must be updated to
+> `alloc(size, false)`. Requires a minor version bump and a migration guide.
 
 ---
 
@@ -144,43 +152,43 @@ typedef struct sc_scope_stats {
 integer Allocator.Scope.stats(scope s, sc_scope_stats *out);
 ```
 
----
-
-### FT-04 — Arena frame support (frames within arenas) 🟡 Medium
-
-**File:** ROADMAP v0.2.4  
-**Problem:** Frames (bulk-deallocation checkpoints) currently operate only on the SLB0 system
-scope. User arenas cannot take frame snapshots and roll back allocations within an arena.
-
-**What it solves:** Enables transactional sub-regions inside a long-lived arena — e.g., an HTTP
-handler arena that takes a frame checkpoint per request, disposes the request state, and keeps
-the arena alive for the next request.
-
-**Implementation:** The frame mechanism (`sc_frame_chunk` chain) is already generic. The blocker
-is wiring `frame_begin`/`frame_end` to operate on an explicit arena scope, not just the R7
-current scope.
+**Effort:** Low — data already lives on the scope struct; this is an accessor/aggregator, not a new data structure.
 
 ---
 
-### FT-05 — Reclaiming policy for user arenas (B-tree-tracked arenas) 🟡 Medium
+### ~~FT-04~~ — Arena frame support ✅ Resolved (v0.2.3)
 
-**Problem:** User arenas use pure bump allocation — individual `dispose` calls are ignored.
-Workloads that sparsely free within a long-lived arena cannot reclaim pages or reuse freed
-blocks, leading to unbounded arena growth.
+**Resolution:** `Frame.begin_in(scope)` / `Frame.end_in(scope, frame)` and
+`Arena.frame_begin(scope)` / `Arena.frame_end(scope, frame)` were implemented in the v0.2.3
+sub-interface split. Frames within arenas work without changing R7.
 
-**What it solves:** Allows arenas to behave like SLB0 (B-tree free list + split/coalesce) while
-still receiving the isolation and bulk-disposal properties of arenas.
-
-**Implementation:** Each arena already has a NodePool. The missing piece is wiring
-`arena_alloc_for_scope` through the skip list + B-tree path instead of the bump path when
-`policy == SCOPE_POLICY_RECLAIMING`.
-
-**Note:** See also BG-02 — the current silent degradation should be fixed before or alongside
-this feature.
+**Follow-up:** Add `test/unit/test_arena_frames.c` to confirm `begin_in` + `end_in` on a
+user arena allocates, bulk-disposes correctly, and leaves the arena intact. Tracked as TG-06.
 
 ---
 
-### FT-06 — B-tree rebalancing (pathological fragmentation protection) 🟡 Medium
+### FT-05 — `SlabAllocator` scope via `SCOPE_POLICY_RECLAIMING` 🟡 Medium
+
+**Problem:** There is no way to create a user-defined slab scope (B-tree-tracked, individual
+alloc/dispose, split/coalesce) beyond the single built-in SLB0. User arenas are pure bump only.
+
+**What it solves:** Allows subsystems that need full reclaiming allocation semantics to get an
+isolated, named slab scope — essentially a user-created SLB0 equivalent.
+
+**Design:** Arenas will **always** be pure bump. `SCOPE_POLICY_RECLAIMING` passed to
+`create_arena(name, SCOPE_POLICY_RECLAIMING)` returns a new `SlabAllocator` scope — backed by
+skip list + per-page B-trees, not a bump arena. All SLB0 mechanics apply: dynamic page growth,
+page release on empty, `realloc`, coalesce.
+
+**Implementation:** Each user scope already has a NodePool (v0.2.2). Wire
+`arena_alloc_for_scope` / `arena_dispose_for_scope` through the `slb0_alloc` / `slb0_dispose`
+path when `policy == SCOPE_POLICY_RECLAIMING`. Bulk-dispose (`dispose_arena`) still applies.
+
+**See also:** BG-02 — must be fixed before or alongside this feature.
+
+---
+
+### FT-06 — B-tree rebalancing (pathological fragmentation protection) � Low
 
 **File:** `src/node_pool.c`  
 **Problem:** The per-page B-tree is an unbalanced BST ordered by block start address. For
@@ -192,8 +200,9 @@ degenerates to a linked list, turning O(log n) searches into O(n).
 **Options:** AVL rotation (lightweight, predictable) or red-black tree (standard).
 Alternatively, a skip list at the B-tree level (consistent with the outer skip list design).
 
-**Note:** In practice, random or mixed patterns keep the tree balanced. This is a defensive
-measure for adversarial or highly ordered workloads.
+**Note:** By design, per-page B-trees stay shallow (≤ ~15 nodes per page). Degenerate cases
+are unlikely in practice and may never warrant balancing. Re-evaluate only if profiling under
+adversarial workloads shows measurable O(n) behaviour.
 
 ---
 
@@ -238,6 +247,8 @@ credentials) survives in freed blocks and is exposed to subsequent allocations.
 SCOPE_FLAG_SECURE`; if set, `memset(ptr, 0, size)` before inserting the free node into the
 B-tree.
 
+**Effort:** Low — `memset` + a flag check in two functions.
+
 ---
 
 ### FT-10 — `Allocator.Scope.compact(scope)` — explicit defragmentation 🟢 Low
@@ -265,6 +276,9 @@ measurement.
 **Fix:** Add a `cbuild coverage` target: compile with `-fprofile-arcs -ftest-coverage`, run test
 suite, generate `lcov` report to `docs/coverage/`. Integrate into CI.
 
+> **Note:** Coverage tooling will also land via the **Sigma.X** toolchain. The `cbuild coverage`
+> target above is a useful local addition in the meantime.
+
 ---
 
 ### TG-02 — Performance benchmarks not in regular CI 🟡 Medium
@@ -279,9 +293,12 @@ tuning work (FT-05, FT-06).
 **Fix:** Add a `rtest perf` category; run benchmarks in CI in opt mode; record baseline numbers
 in `test/performance/benchmark_journal.md` and fail if throughput drops >10%.
 
+> **Note:** Performance tracking tooling will also arrive via the **Sigma.X** toolchain.
+> Maintain `benchmark_journal.md` manually in the meantime to preserve baseline data.
+
 ---
 
-### TG-03 — Integration test suite partially blocked 🟡 Medium
+### TG-03 — Integration test suite partially blocked � High
 
 **File:** `test/integration/test_integration.c`, `docs/PHASE7_TEST_AUDIT.md`  
 **Problem:** Several integration tests were marked `⏸️ BLOCKED` during Phase 7 development and
@@ -294,9 +311,11 @@ interacting together) has the same test confidence as the unit layer.
 **Fix:** Audit `test/integration/test_integration.c` against current API; update or add test
 cases for the full lifecycle.
 
+**Effort:** Low — Phase 7 is complete; this is an audit + assertion-update task, not a new implementation.
+
 ---
 
-### TG-04 — Stress tests not in standard run 🟡 Medium
+### TG-04 — Stress tests not in standard run � High
 
 **Files:** `test/stress/test_edge_cases.c`, `test_memory_exhaustion.c`, `test_sustained_load.c`  
 **Problem:** Stress and exhaustion tests live in `test/stress/` but `rtest unit` doesn't run
@@ -308,9 +327,11 @@ pressure, edge input sizes) — exactly the paths where latent bugs hide.
 
 **Fix:** Build and run all stress tests; fix any compilation failures; add `rtest stress` category.
 
+**Effort:** Low — run existing files, fix any compile errors against current API, wire into `rtest stress`.
+
 ---
 
-### TG-05 — No fuzz testing 🟢 Low
+### TG-05 — No fuzz testing � Medium
 
 **Problem:** Allocation size inputs are only exercised by hand-written test cases. A fuzzer
 (libFuzzer or AFL) targeting `Allocator.alloc(random_size)` + `Allocator.dispose` + `realloc`
@@ -318,6 +339,24 @@ sequences would find size-boundary bugs and integer overflow paths that determin
 
 **What it solves:** Catches correctness issues at unusual sizes (0, 1, `SIZE_MAX`, powers-of-2
 boundaries, `kAlign` ± 1).
+
+**Approach:** Incremental — add one fuzz target each time a source file is opened for modification.
+Start with `Allocator.alloc` size boundaries; expand to `realloc` sequences and `dispose`
+corner cases over time.
+
+---
+
+### TG-06 — No test coverage for `Frame.begin_in` / `Frame.end_in` on arenas 🟠 High
+
+**Context:** FT-04 was marked resolved — `Frame.begin_in(scope)` / `Frame.end_in(scope, frame)`
+exist in the v0.2.3 API. However, no test suite exercises frames on a user arena scope.
+
+**What it solves:** Confirms the v0.2.3 sub-interface wiring is correct and catches any
+regression where `begin_in` on an arena silently operates on the wrong scope.
+
+**Fix:** Create `test/unit/test_arena_frames.c` with cases: frame on arena allocates from arena,
+`end_in` bulk-disposes correctly, arena remains valid and allocatable after frame disposal,
+`begin_in` on two different arenas independently track frame state.
 
 ---
 
@@ -334,8 +373,12 @@ it is exhausted.
 **What it solves:** Prevents an eventual hard ceiling on system-level growth without requiring a
 full memory system redesign.
 
-**Options:** Reserve explicit version/growth header in SYS0; consider a multi-page SYS0 model
-for v0.3+.
+**Options:** Reserve an explicit growth header in SYS0; consider a two-tier model (fixed SYS0
+header + dynamically-allocated extension page for overflow scope table entries).
+
+> **Note:** Dynamic SYS0 growth carries real stability risk — internal paths assume registers and
+> page-zero sentinel structures are at fixed addresses. The right upper bound isn't yet known.
+> Deferred until real headroom pressure is observed in production use.
 
 ---
 
@@ -353,17 +396,12 @@ the fixed SYS0 size (AD-01).
 
 ---
 
-### AD-03 — Maximum 16 frame nesting depth is a hard-coded stack limit 🟢 Low
+### ~~AD-03~~ — Frame nesting depth limit ✅ Resolved (v0.2.3)
 
-**File:** `src/memory.c` — frame stack implementation  
-**Problem:** Frame nesting is limited to 16 levels. Deeply recursive algorithms that use frames
-for per-frame cleanup hit this ceiling and receive `NULL` from `frame_begin`.
-
-**What it solves:** Recursive compilers, parsers, and tree-walkers that use a frame per stack
-frame need more headroom.
-
-**Fix:** Make the limit configurable via a compile-time `#define SC_MAX_FRAME_DEPTH` or convert
-to a dynamic stack (allocated in the current scope).
+**Resolution:** Nested frames were replaced with a **single active frame per scope**
+(`MAX_FRAME_DEPTH = 1` in `include/internal/memory.h`). The R7 stack-of-frames approach was
+removed; the `prev`-chain handles scope switching instead. No nesting depth limit applies to
+the current design.
 
 ---
 
@@ -376,12 +414,14 @@ to a dynamic stack (allocated in the current scope).
 **What it solves:** Using R1 for NodePool base cache would eliminate one pointer dereference per
 B-tree operation — measurable in tight allocation loops.
 
-**Fix:** Implement R1 = `scope->nodepool_base` cache; update `nodepool_get_*` macros to use it.
-Deferred until profiling shows it's a bottleneck.
+**Context:** R1/R3-R6 are reserved for allocation by **external Sigma.X subsystems**
+(Sigma.Tasking and others). They are intentionally unclaimed by `sigma.memory` to leave room
+for the broader ecosystem. The R1 NodePool-base cache optimization remains valid but must not
+be assigned until the register map across Sigma.X modules is formally defined.
 
 ---
 
-### AD-05 — No public error reporting mechanism 🟡 Medium
+### AD-05 — No public error reporting mechanism � High
 
 **Problem:** Allocation failures return `NULL`. There is no structured error code, no last-error
 query, and no diagnostic string. Callers cannot distinguish "out of memory", "size too large",
@@ -405,6 +445,9 @@ typedef enum sc_error {
 sc_error Memory.last_error(void);
 const char *Memory.error_string(sc_error err);
 ```
+
+**Effort:** Low — add a thread-local `sc_last_error` variable; set it at every `NULL`-returning
+path; expose `Memory.last_error()` and `Memory.error_string()`.
 
 ---
 
@@ -460,12 +503,22 @@ there is demonstrated demand.
 
 ---
 
+## ✅ Resolved Items
+
+| ID | Item | Resolved In |
+|----|------|-------------|
+| FT-04 | Arena frame support (`Frame.begin_in` / `Frame.end_in`) | v0.2.3 |
+| AD-03 | Frame nesting depth limit (replaced with single-frame-per-scope model) | v0.2.3 |
+
+---
+
 ## Summary by Priority
 
 | Count | Priority | Items |
 |-------|----------|-------|
 | 1 | 🔴 Critical | FT-01 |
-| 5 | 🟠 High | BG-01, BG-02, FT-02, FT-03, TG-01 |
-| 11 | 🟡 Medium | BG-03, BG-04, FT-04, FT-05, FT-06, FT-08, FT-09, TG-02, TG-03, TG-04, AD-05 |
-| 8 | 🟢 Low | FT-07, FT-10, TG-05, AD-01, AD-02, AD-03, AD-04, DG-01, DG-02 |
+| 10 | 🟠 High | BG-01, BG-02, FT-02, FT-03, FT-09, TG-01, TG-03, TG-04, TG-06, AD-05 |
+| 6 | 🟡 Medium | BG-03, BG-04, FT-05, FT-08, TG-02, TG-05 |
+| 8 | 🟢 Low | FT-06, FT-07, FT-10, AD-01, AD-02, AD-04, DG-01, DG-02 |
+| 2 | ✅ Resolved | FT-04, AD-03 |
 | 5 | ⏸️ Deferred | CD-01 through CD-05 |
