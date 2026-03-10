@@ -8,7 +8,7 @@
  */
 
 #include <stdio.h>
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "memory.h"
 #include "sigma.core/types.h"
 

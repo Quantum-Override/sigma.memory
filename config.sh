@@ -24,9 +24,9 @@ if [ "$ASAN_ENABLED" = true ]; then
 fi
 
 CFLAGS="$BASE_CFLAGS"
-TST_CFLAGS="$CFLAGS -DTSTDBG -I/usr/local/include/sigma.test"
+TST_CFLAGS="$CFLAGS -DTSTDBG"
 LDFLAGS="-shared"
-TST_LDFLAGS="-lstest -L/usr/lib"
+TST_LDFLAGS="/usr/local/packages/sigma.test.o /usr/local/packages/sigma.text.o -Wl,--wrap=malloc,--wrap=free"
 
 SRC_DIR=src
 BUILD_DIR=build

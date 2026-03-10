@@ -8,7 +8,7 @@
  *  - Tier 2: Per-page B-trees for O(log n) block lookup
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>

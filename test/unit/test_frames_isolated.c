@@ -2,7 +2,7 @@
  * Test isolated frame scenario to debug resource exhaustion
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include "memory.h"
 

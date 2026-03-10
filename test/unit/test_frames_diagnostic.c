@@ -2,7 +2,7 @@
  * Diagnostic test to understand resource exhaustion
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "memory.h"
 #include <stdio.h>
 

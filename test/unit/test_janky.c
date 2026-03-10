@@ -25,7 +25,7 @@
  * Description: Stress tests for mixed-scope usage (the "janky" patterns)
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include "memory.h"
 

@@ -25,7 +25,7 @@
  * Description: TDD tests for Scope interface R7 stack management
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include "memory.h"
 

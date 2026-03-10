@@ -35,7 +35,7 @@
  *   REA-08  Grow failure propagation: original pointer still valid on OOM
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <string.h>
 #include "internal/memory.h"
 #include "memory.h"

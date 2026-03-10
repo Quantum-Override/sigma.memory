@@ -10,7 +10,7 @@
  *              Testing NodePool page_node and btree_node growth
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "internal/memory.h"
 #include "internal/node_pool.h"
 #include "memory.h"

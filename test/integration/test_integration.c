@@ -9,7 +9,7 @@
  * Description: Integration tests for B-Tree allocator
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

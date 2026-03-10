@@ -13,7 +13,7 @@
  *  - Build from simple (single node) to complex (multiple nodes)
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>

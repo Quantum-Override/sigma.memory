@@ -25,7 +25,7 @@
  * Description: Test behavior at NodePool limits and memory pressure
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include <sys/mman.h>
 

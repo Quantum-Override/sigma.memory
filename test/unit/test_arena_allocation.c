@@ -10,7 +10,7 @@
  * - Frame support in arenas
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "memory.h"
 #include "internal/memory.h"
 #include <stdio.h>

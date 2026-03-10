@@ -43,7 +43,7 @@
  *           for same-size allocations (pure B-tree reuse path)
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <string.h>
 #include "internal/memory.h"
 #include "internal/node_pool.h"

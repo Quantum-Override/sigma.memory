@@ -10,7 +10,7 @@
  *              Phase 1 Day 4: Arena.create_arena / Arena.dispose_arena
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "internal/memory.h"
 #include "memory.h"
 #include <string.h>

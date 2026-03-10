@@ -10,7 +10,7 @@
  *              Phase 1 Day 2: NPB-01, NPB-02, NPB-03
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "internal/memory.h"
 #include "internal/node_pool.h"
 #include "memory.h"

@@ -25,7 +25,7 @@
  * Description: TDD tests for Frame interface - explicit scope targeting
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include "memory.h"
 

@@ -25,7 +25,7 @@
  * Description: Boundary conditions and pathological inputs
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include <sys/mman.h>
 

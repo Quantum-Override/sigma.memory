@@ -7,7 +7,7 @@
  * Description: Stress tests for B-Tree invariants validation
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

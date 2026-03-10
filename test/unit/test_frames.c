@@ -10,7 +10,7 @@
  *              Tests chunked bump allocation with LIFO nesting
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "internal/memory.h"
 #include "memory.h"
 

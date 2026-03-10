@@ -8,7 +8,7 @@
 #include "internal/slab_manager.h"
 #include "memory.h"
 // ----------------
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 
 #define MEM_STATE_ALIGN_MASK \
     (MEM_STATE_ALIGN_SYS0 | MEM_STATE_ALIGN_HEADER | MEM_STATE_ALIGN_FOOTER)

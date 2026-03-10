@@ -38,7 +38,7 @@
  *   PRL-05  SLB0 is still usable after a dynamic page is released
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdlib.h>
 #include <string.h>
 #include "internal/memory.h"

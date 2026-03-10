@@ -10,7 +10,7 @@
  *              Phase 1 Day 3: Data integrity, stress testing
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include "internal/memory.h"
 #include "internal/node_pool.h"
 #include "memory.h"

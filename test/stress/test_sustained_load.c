@@ -25,7 +25,7 @@
  * Description: Long-running stress test with random allocation patterns
  */
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>

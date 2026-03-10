@@ -9,7 +9,7 @@
 
 #define _POSIX_C_SOURCE 199309L
 
-#include <sigtest/sigtest.h>
+#include <sigma.test/sigtest.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
