@@ -1,10 +1,10 @@
-[2] Scope Interface: R7 Stack :    6 : 2026-03-09  14:01:52                     
+[2] Scope Interface: R7 Stack :    6 : 2026-03-11  00:27:05                     
 ================================================================================
-Running: SI-01: current() returns SLB0 at startup            26529.972 ms [PASS]
-Running: SI-02: Arena.create sets R7 automatically            4807.099 ms [PASS]
-Running: SI-03: Arena.dispose restores R7                      996.980 ms [PASS]
-Running: SI-04: Scope.set pushes R7 stack                     2911.553 ms [PASS]
-Running: SI-05: Scope.restore pops R7 LIFO                    1165.327 ms [PASS]
-Running: SI-06: set on already-active scope returns ERR       1175.880 ms [PASS]
+Running: SI-01: current() returns SLB0 at startup                5.456 ms [PASS]
+Running: SI-02: Arena.create sets R7 automatically              14.037 ms [PASS]
+Running: SI-03: Arena.dispose restores R7                       11.502 ms [PASS]
+Running: SI-04: Scope.set pushes R7 stack                       19.071 ms [PASS]
+Running: SI-05: Scope.restore pops R7 LIFO                      20.572 ms [PASS]
+Running: SI-06: set on already-active scope returns ERR         24.609 ms [PASS]
 ================================================================================
 [2]     TESTS=  6        PASS=  6        FAIL=  0        SKIP=  0

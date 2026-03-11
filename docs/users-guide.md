@@ -1,6 +1,6 @@
-# SigmaCore Memory - Users Guide
+# Sigma.Memory - Users Guide
 
-**Version:** 0.2.3-realloc  
+**Version:** 0.2.3  
 **Date:** March 9, 2026
 
 ---

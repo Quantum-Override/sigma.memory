@@ -1,18 +1,18 @@
-[2] MTIS: Per-Page B-Tree Operations :   14 : 2026-03-09  14:01:42              
+[2] MTIS: Per-Page B-Tree Operations :   14 : 2026-03-11  00:27:04              
 ================================================================================
-Running: B-Tree: warmup                                       6874.457 ms [PASS]
-Running: B-Tree: insert single node                           4419.980 ms [PASS]
-Running: B-Tree: insert maintains BST                         3813.040 ms [PASS]
-Running: B-Tree: insert updates count                         1606.161 ms [PASS]
-Running: B-Tree: search exact match                           2749.611 ms [PASS]
-Running: B-Tree: search not found                             1439.275 ms [PASS]
-Running: B-Tree: search best fit                              5115.538 ms [PASS]
-Running: B-Tree: delete leaf                                  4549.197 ms [PASS]
-Running: B-Tree: delete single child                          2616.297 ms [PASS]
-Running: B-Tree: delete two children                          3934.543 ms [PASS]
-Running: B-Tree: coalesce left neighbor                       6520.643 ms [PASS]
-Running: B-Tree: coalesce right neighbor                      2831.469 ms [PASS]
-Running: B-Tree: coalesce both neighbors                      2393.294 ms [PASS]
-Running: B-Tree: coalesce not adjacent                        1717.817 ms [PASS]
+Running: B-Tree: warmup                                         12.195 ms [PASS]
+Running: B-Tree: insert single node                              5.990 ms [PASS]
+Running: B-Tree: insert maintains BST                            4.478 ms [PASS]
+Running: B-Tree: insert updates count                            4.389 ms [PASS]
+Running: B-Tree: search exact match                              5.497 ms [PASS]
+Running: B-Tree: search not found                                4.250 ms [PASS]
+Running: B-Tree: search best fit                                 4.737 ms [PASS]
+Running: B-Tree: delete leaf                                     5.384 ms [PASS]
+Running: B-Tree: delete single child                             4.735 ms [PASS]
+Running: B-Tree: delete two children                             4.650 ms [PASS]
+Running: B-Tree: coalesce left neighbor                          5.365 ms [PASS]
+Running: B-Tree: coalesce right neighbor                         4.368 ms [PASS]
+Running: B-Tree: coalesce both neighbors                         4.290 ms [PASS]
+Running: B-Tree: coalesce not adjacent                           4.988 ms [PASS]
 ================================================================================
 [2]     TESTS= 14        PASS= 14        FAIL=  0        SKIP=  0

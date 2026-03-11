@@ -1,9 +1,9 @@
-[2] Arena: Integration & Stress :    5 : 2026-03-08  18:14:49                   
+[2] Arena: Integration & Stress :    5 : 2026-03-11  00:27:05                   
 ================================================================================
-Running: AIT-01: Exhaustion & recovery                       19479.748 ms [PASS]
-Running: AIT-02: Mixed scope allocations                     39465.922 ms [PASS]
-Running: AIT-03: Large allocation stress                      7632.500 ms [PASS]
-Running: AIT-04: Rapid create-dispose stress                 18033.548 ms [PASS]
-Running: AIT-05: Concurrent arena operations                 10182.917 ms [PASS]
+Running: AIT-01: Exhaustion & recovery                         422.368 ms [PASS]
+Running: AIT-02: Mixed scope allocations                       119.916 ms [PASS]
+Running: AIT-03: Large allocation stress                       202.562 ms [PASS]
+Running: AIT-04: Rapid create-dispose stress                  1554.205 ms [PASS]
+Running: AIT-05: Concurrent arena operations                   443.286 ms [PASS]
 ================================================================================
 [2]     TESTS=  5        PASS=  5        FAIL=  0        SKIP=  0

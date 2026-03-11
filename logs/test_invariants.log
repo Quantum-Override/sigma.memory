@@ -1,10 +1,10 @@
-[2] MTIS: B-Tree Invariants Validation :    6 : 2026-02-12  10:41:47            
+[2] MTIS: B-Tree Invariants Validation :    6 : 2026-03-11  00:27:05            
 ================================================================================
-Running: I1: BST property maintained                            10.717 ms [PASS]
-Running: I2: Free flag consistency                               2.589 ms [PASS]
-Running: I5: Length validation                                   2.840 ms [PASS]
-Running: I6: No adjacent free blocks                            18.999 ms [PASS]
-Running: Stress: Random allocation pattern                      10.703 ms [PASS]
-Running: Stress: Delete operations                               6.785 ms [PASS]
+Running: I1: BST property maintained                             6.037 ms [PASS]
+Running: I2: Free flag consistency                               2.873 ms [PASS]
+Running: I5: Length validation                                   3.228 ms [PASS]
+Running: I6: No adjacent free blocks                             3.209 ms [PASS]
+Running: Stress: Random allocation pattern                      10.728 ms [PASS]
+Running: Stress: Delete operations                               7.379 ms [PASS]
 ================================================================================
 [2]     TESTS=  6        PASS=  6        FAIL=  0        SKIP=  0

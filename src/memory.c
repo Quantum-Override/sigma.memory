@@ -1737,7 +1737,7 @@ static void init_scope_table_sys0(void) {
     sys0_entry->nodepool_base = ADDR_EMPTY;
 }
 
-__attribute__((constructor(101))) void init_memory_system(void) {
+__attribute__((constructor)) void init_memory_system(void) {
     // Verify SYS0_PAGE_SIZE is a power of 2
     if ((SYS0_PAGE_SIZE & (SYS0_PAGE_SIZE - 1)) != 0) {
         fprintf(stderr, "FATAL: SYS0_PAGE_SIZE (%d) must be a power of 2\n", SYS0_PAGE_SIZE);

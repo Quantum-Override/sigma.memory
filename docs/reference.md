@@ -1,6 +1,6 @@
-# SigmaCore Memory System - Architecture & Reference Guide
+# Sigma.Memory - Architecture & Reference Guide
 
-**Version:** 0.2.2-arenas  
+**Version:** 0.2.3  
 **Date:** March 8, 2026  
 **Status:** Beta Release (User Arenas + Dynamic NodePool Growth)
 

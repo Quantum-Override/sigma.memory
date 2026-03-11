@@ -1,5 +1,5 @@
 /*
- * SigmaCore Memory v0.2.2 - Phase 1 Week 1
+ * Sigma.Memory v0.2.3 - Phase 1 Week 1
  * Day 6: Arena Allocation Testing (AAL-01 through AAL-05)
  *
  * Tests arena-scoped allocation:

@@ -1,6 +1,6 @@
-# SigmaCore Memory — Backlog
+# Sigma.Memory — Backlog
 
-**Version:** 0.2.3-realloc  
+**Version:** 0.2.3  
 **Last Updated:** March 9, 2026  
 **Maintained By:** SigmaCore Development Team
 

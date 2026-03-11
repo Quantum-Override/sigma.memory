@@ -1,6 +1,6 @@
-# SigmaCore Memory - Roadmap
+# Sigma.Memory - Roadmap
 
-**Current Version:** 0.2.3-realloc (Realloc API + Dynamic Page Release + Skip List Fix) ✅  
+**Current Version:** 0.2.3  
 **Last Updated:** March 9, 2026  
 **Branch:** main
 

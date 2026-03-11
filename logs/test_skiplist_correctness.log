@@ -1,8 +1,8 @@
-[2] Unit: Skip List Correctness (Task 7) :    4 : 2026-03-09  14:01:53          
+[2] Unit: Skip List Correctness (Task 7) :    4 : 2026-03-11  00:27:05          
 ================================================================================
-Running: SLC-01: B-tree free blocks reused for same-size allocs30689.693 ms [PASS]
-Running: SLC-02: Coalesced free blocks serve larger allocs    2775.602 ms [PASS]
-Running: SLC-03: Fragmented page skipped for large request (T7 regression)89529.462 ms [PASS]
-Running: SLC-04: Full fill → full free → re-alloc: no new page6488.312 ms [PASS]
+Running: SLC-01: B-tree free blocks reused for same-size allocs 21.740 ms [PASS]
+Running: SLC-02: Coalesced free blocks serve larger allocs       5.138 ms [PASS]
+Running: SLC-03: Fragmented page skipped for large request (T7 regression)1704.123 ms [PASS]
+Running: SLC-04: Full fill → full free → re-alloc: no new page231.131 ms [PASS]
 ================================================================================
 [2]     TESTS=  4        PASS=  4        FAIL=  0        SKIP=  0

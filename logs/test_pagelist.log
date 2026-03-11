@@ -1,9 +1,14 @@
-[2] MTIS: PageList (Skip List) Operations :   10 : 2026-03-09  14:01:48         
+[2] MTIS: PageList (Skip List) Operations :   10 : 2026-03-11  00:27:05         
 ================================================================================
-Running: PageList: insert single page                         7519.077 ms [PASS]
-Running: PageList: insert maintains address order             2564.945 ms [PASS]
-Running: PageList: insert multiple pages                      1838.278 ms [PASS]
-Running: PageList: find containing page                       3170.793 ms [PASS]
-Running: PageList: find containing boundary                    989.405 ms [PASS]
-Running: PageList: find containing not found                  1349.425 ms [PASS]
-Running: PageList: find for size                 
+Running: PageList: insert single page                            9.251 ms [PASS]
+Running: PageList: insert maintains address order                4.275 ms [PASS]
+Running: PageList: insert multiple pages                         3.262 ms [PASS]
+Running: PageList: find containing page                          2.579 ms [PASS]
+Running: PageList: find containing boundary                      2.575 ms [PASS]
+Running: PageList: find containing not found                     2.600 ms [PASS]
+Running: PageList: find for size                                12.817 ms [PASS]
+Running: PageList: remove single page                            2.817 ms [PASS]
+Running: PageList: remove head page                              3.573 ms [PASS]
+Running: PageList: remove middle page                            3.037 ms [PASS]
+================================================================================
+[2]     TESTS= 10        PASS= 10        FAIL=  0        SKIP=  0

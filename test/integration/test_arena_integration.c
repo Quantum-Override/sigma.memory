@@ -1,5 +1,5 @@
 /*
- * SigmaCore Memory v0.2.2 - Phase 1 Week 1
+ * Sigma.Memory v0.2.3 - Phase 1 Week 1
  * Day 7: Arena Integration & Stress Testing (AIT-01 through AIT-05)
  *
  * Comprehensive integration tests:

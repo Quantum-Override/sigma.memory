@@ -1,7 +1,7 @@
 # sigma.memory
 
-**Version:** 0.2.1-frames  
-**Status:** Alpha - Ready for Dog-Fooding 🐶  
+**Version:** 0.2.3  
+**Status:** Beta - Ready for Dog-Fooding 🐶  
 **Target:** Sigma.Test & Anvil Integration
 
 A high-performance C memory allocator with B-tree external metadata architecture designed for systems programming where you need fast, predictable allocations without libc dependencies.
@@ -75,7 +75,7 @@ A high-performance C memory allocator with B-tree external metadata architecture
 - **Game engines (frame-based memory management)**
 - Systems where libc malloc isn't available
 
-## Features (v0.2.1-frames)
+## Features (v0.2.3)
 
 ### Core Architecture
 - **B-Tree External Metadata** - Allocation tracking outside user pages (100% utilization)

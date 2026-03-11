@@ -1,5 +1,5 @@
 /*
- * SigmaCore Memory v0.2.2 - Phase 1 Week 1
+ * Sigma.Memory v0.2.3 - Phase 1 Week 1
  * Day 5: Arena Disposal Testing (ADS-01 through ADS-05)
  * 
  * Tests comprehensive arena disposal scenarios:
