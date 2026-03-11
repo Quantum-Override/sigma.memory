@@ -18,12 +18,24 @@
 #if 1  // Region: Test Set Setup & Teardown
 static void set_config(FILE **log_stream) {
     *log_stream = fopen("logs/test_arena_lifecycle.log", "w");
+    // sigma.test arena occupies slot 2; restore R7 back to SLB0 so scope
+    // operations see the expected baseline (14 user slots minus 1 = 13 free).
+    Allocator.Scope.restore();
     sbyte state = Memory.state();
     Assert.isTrue(state & MEM_STATE_READY, "Memory system should be ready");
 }
 
 static void set_teardown(void) {
-    // Cleanup
+    // Safety net: dispose any arenas leaked by a failed test (slots 3-15).
+    // Slot 2 belongs to sigma.test framework — do not touch it.
+    for (usize i = 3; i < 16; i++) {
+        scope s = Memory.get_scope(i);
+        if (s != NULL && s->nodepool_base != ADDR_EMPTY) {
+            Allocator.dispose_arena(s);
+        }
+    }
+    // Restore R7 back to SLB0 before next test case.
+    Allocator.Scope.restore();
 }
 #endif
 
@@ -118,18 +130,20 @@ void test_allocator_create_multiple_arenas(void) {
 }
 
 // ============================================================================
-// ALC-03: Arena exhaustion (max 14 arenas: SLB1-14)
+// ALC-03: Arena exhaustion (max 13 user arenas available)
+// Note: sigma.test framework pre-allocates sigtest_arena at slot 2, leaving
+//       slots 3-15 (13 slots) free for user arenas.
 // ============================================================================
 void test_allocator_arena_exhaustion(void) {
-    // Arrange: SLB0 already exists at index 1, can create 14 more (indices 2-15)
-    // Note: Index 15 reserved for future system use
-    printf("  Attempting to create 14 arenas (SLB1-14)...\n");
+    // Arrange: SLB0 already exists at index 1; sigma.test uses slot 2.
+    //          Available user slots: 3-15 = 13 arenas.
+    printf("  Attempting to create 13 arenas (slots 3-15)...\n");
     
-    scope arenas[14];
+    scope arenas[13];
     int created_count = 0;
     
-    // Act: Create up to 14 arenas
-    for (int i = 0; i < 14; i++) {
+    // Act: Create up to 13 arenas
+    for (int i = 0; i < 13; i++) {
         char name[16];
         snprintf(name, 16, "arena_%d", i);
         arenas[i] = Allocator.create_arena(name, SCOPE_POLICY_RECLAIMING);
@@ -147,16 +161,16 @@ void test_allocator_arena_exhaustion(void) {
     
     printf("  Successfully created %d arenas\n", created_count);
     
-    // Assert: Should create all 14 arenas
-    Assert.isTrue(created_count == 14,
-        "Should create all 14 arenas: got %d", created_count);
+    // Assert: Should create all 13 arenas (14 total minus 1 for sigma.test)
+    Assert.isTrue(created_count == 13,
+        "Should create 13 arenas (slots 3-15): got %d", created_count);
     
-    // Assert: 15th arena should fail (exhausted)
+    // Assert: 14th arena should fail — slots 2-15 all occupied
     scope overflow = Allocator.create_arena("overflow", SCOPE_POLICY_RECLAIMING);
     Assert.isNull(overflow, 
-        "15th arena should fail (scope table exhausted)");
+        "14th arena should fail (scope table exhausted)");
     
-    printf("  ✓ Correctly rejected 15th arena (exhaustion)\n");
+    printf("  ✓ Correctly rejected 14th arena (exhaustion)\n");
     
     // Cleanup: Dispose all created arenas
     for (int i = 0; i < created_count; i++) {

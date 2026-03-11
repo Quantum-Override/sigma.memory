@@ -30,7 +30,7 @@ static void set_teardown(void) {
 void test_ait_01_arena_exhaustion_recovery(void) {
     fprintf(stdout, "\n=== AIT-01: Arena Exhaustion & Recovery ===\n");
 
-    const int MAX_ARENAS = 14;  // SLB1-14 (slots 2-15)
+    const int MAX_ARENAS = 13;  // SLB2-14 (slots 3-15); slot 2 used by sigma.test framework
     scope arenas[MAX_ARENAS];
 
     // Phase 1: Fill all 14 arena slots

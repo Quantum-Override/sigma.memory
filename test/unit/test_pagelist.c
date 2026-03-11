@@ -269,19 +269,36 @@ void test_pagelist_find_containing_not_found(void) {
 
 void test_pagelist_find_for_size(void) {
     reset_nodepool();
-    // Insert page with some block_count
+
+    // skiplist_find_for_size Check 2 dereferences page_base as a page_sentinel*
+    // to read bump_offset. Use a real mmap'd page so the dereference is safe.
+    void *real_page = mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (real_page == MAP_FAILED) {
+        Assert.fail("test_pagelist_find_for_size: mmap failed");
+        return;
+    }
+
+    // Initialise page sentinel: bump_offset just past the sentinel header,
+    // leaving most of the page as available bump space.
+    page_sentinel ps = (page_sentinel)real_page;
+    ps->next_page_off = 0;
+    ps->bump_offset   = sizeof(sc_page_sentinel);  // 32 bytes used; ~8160 free
+
     uint16_t page_idx = alloc_page_node_slot();
     page_node *node = get_page_node(page_idx);
-    node->page_base = 0x100000;
-    node->block_count = 10;  // Has space
-    skiplist_insert(test_scope, 0x100000, page_idx);
+    node->page_base   = (addr)real_page;
+    node->block_count = 1;
+    skiplist_insert(test_scope, (addr)real_page, page_idx);
 
-    // Find page with space
+    // Find page with 64 bytes of space
     uint16_t found_idx = PAGE_NODE_NULL;
     int result = skiplist_find_for_size(test_scope, 64, &found_idx);
 
     Assert.isTrue(result == OK, "Should find page with space");
-    Assert.isTrue(found_idx == page_idx, "Should return correct page");
+    Assert.isTrue(found_idx == page_idx, "Should return correct page index");
+
+    munmap(real_page, SYS0_PAGE_SIZE);
 }
 #endif
 

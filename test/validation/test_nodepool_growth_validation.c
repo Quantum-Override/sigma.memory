@@ -53,8 +53,8 @@ void test_growth_preserves_existing_data(void) {
     page_node *pn1 = nodepool_get_page_node(s, page_idx1);
     Assert.isNotNull(pn1, "Page node 1 pointer should be valid");
     pn1->page_base = 0xDEADBEEF;
-    pn1->btree_root = 0x1234;
-    pn1->block_count = 0x5678;
+    pn1->btree_root = NODE_NULL;   // NODE_NULL is the correct empty-page state;
+    pn1->block_count = 0x5678;     // btree_root is patched by reindex on growth
 
     uint16_t page_idx2 = nodepool_alloc_page_node(s);
     Assert.isTrue(page_idx2 != PAGE_NODE_NULL, "Page allocation 2 should succeed");
@@ -62,8 +62,8 @@ void test_growth_preserves_existing_data(void) {
     page_node *pn2 = nodepool_get_page_node(s, page_idx2);
     Assert.isNotNull(pn2, "Page node 2 pointer should be valid");
     pn2->page_base = 0xCAFEBABE;
-    pn2->btree_root = 0xABCD;
-    pn2->block_count = 0xDCBA;
+    pn2->btree_root = NODE_NULL;   // NODE_NULL is the correct empty-page state;
+    pn2->block_count = 0xDCBA;     // btree_root is patched by reindex on growth
 
     printf("  Allocated page nodes: idx1=%u, idx2=%u\n", page_idx1, page_idx2);
     printf("  Sentinel values: page1=0x%lX, page2=0x%lX\n", (unsigned long)pn1->page_base,
@@ -84,15 +84,17 @@ void test_growth_preserves_existing_data(void) {
     Assert.isTrue(h->capacity > initial_capacity, "Pool should have grown: %zu -> %zu",
                   initial_capacity, h->capacity);
 
-    // Assert: Original page_node data intact after mremap
-    // Page nodes grow from bottom, so indices are stable
+    // Assert: Original page_node data intact after mremap.
+    // page_base and block_count are plain data fields — never reindexed.
+    // btree_root is a btree_node index: if non-NULL it gets patched by reindexing;
+    // we set it to NODE_NULL so it is skipped by the reindex and stays zero.
     pn1 = nodepool_get_page_node(s, page_idx1);
     Assert.isNotNull(pn1, "Page node 1 pointer should still be valid");
     Assert.isTrue(pn1->page_base == 0xDEADBEEF,
                   "Page1 data corrupted: expected 0xDEADBEEF, got 0x%lX",
                   (unsigned long)pn1->page_base);
-    Assert.isTrue(pn1->btree_root == 0x1234,
-                  "Page1 btree_root corrupted: expected 0x1234, got 0x%X", pn1->btree_root);
+    Assert.isTrue(pn1->btree_root == NODE_NULL,
+                  "Page1 btree_root corrupted: expected NODE_NULL, got 0x%X", pn1->btree_root);
     Assert.isTrue(pn1->block_count == 0x5678,
                   "Page1 block_count corrupted: expected 0x5678, got 0x%X", pn1->block_count);
 
@@ -101,8 +103,8 @@ void test_growth_preserves_existing_data(void) {
     Assert.isTrue(pn2->page_base == 0xCAFEBABE,
                   "Page2 data corrupted: expected 0xCAFEBABE, got 0x%lX",
                   (unsigned long)pn2->page_base);
-    Assert.isTrue(pn2->btree_root == 0xABCD,
-                  "Page2 btree_root corrupted: expected 0xABCD, got 0x%X", pn2->btree_root);
+    Assert.isTrue(pn2->btree_root == NODE_NULL,
+                  "Page2 btree_root corrupted: expected NODE_NULL, got 0x%X", pn2->btree_root);
     Assert.isTrue(pn2->block_count == 0xDCBA,
                   "Page2 block_count corrupted: expected 0xDCBA, got 0x%X", pn2->block_count);
 

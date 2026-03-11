@@ -46,6 +46,7 @@ static void set_pool_base(addr base);
 static addr get_pool_base(void);
 static void init_free_list(void);
 static void btree_purge_recursive(scope scope_ptr, node_idx current_idx);
+static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity, usize new_capacity);
 
 // NodePool state (file-local static variables)
 static addr s_pool_base = ADDR_EMPTY;          // Base address of NodePool
@@ -335,6 +336,83 @@ void nodepool_shutdown(scope scope_ptr) {
 }
 
 /**
+ * @brief Patch every stored btree_node index after pool growth + memmove.
+ *
+ * The nodepool index formula is capacity-relative:
+ *   offset = capacity - (capacity_nodes - idx) * NODE_SIZE
+ *
+ * When the pool grows (capacity doubles) AND existing btree_nodes are memmoved
+ * to the new top, every stored index must be shifted by:
+ *   delta = (new_capacity / NODE_SIZE) - (old_capacity / NODE_SIZE)
+ *
+ * so that the formula maps each index to the same physical bytes in the new
+ * (larger) mapping.
+ *
+ * Walk all locations that store a btree_node index and add delta:
+ *   - scope fields (current_frame_idx, current_chunk_idx, active_frame fields)
+ *   - nodepool_header->btree_free_head
+ *   - every allocated page_node's btree_root
+ *   - every allocated btree_node's left_idx, right_idx, and optional chain fields
+ */
+static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity,
+                                       usize new_capacity) {
+    if (scope_ptr == NULL || scope_ptr->nodepool_base == ADDR_EMPTY) {
+        return;
+    }
+
+    usize old_nodes = old_capacity / sizeof(sc_node);
+    usize new_nodes = new_capacity / sizeof(sc_node);
+    if (new_nodes <= old_nodes) {
+        return;  // Nothing to do (shouldn't happen)
+    }
+    uint16_t delta = (uint16_t)(new_nodes - old_nodes);
+
+// Convenience macro: add delta to a uint16_t field if it is not the NULL sentinel
+#define REINDEX(field) \
+    do {               \
+        if ((field) != NODE_NULL) (field) = (uint16_t)((field) + delta); \
+    } while (0)
+
+    nodepool_header *header = (nodepool_header *)scope_ptr->nodepool_base;
+
+    // ── Scope-level btree_node index fields ──────────────────────────────
+    REINDEX(scope_ptr->current_frame_idx);
+    REINDEX(scope_ptr->current_chunk_idx);
+    REINDEX(scope_ptr->active_frame.head_chunk_idx);
+    REINDEX(scope_ptr->active_frame.large_allocs_head);
+
+    // ── NodePool free-list head ───────────────────────────────────────────
+    REINDEX(header->btree_free_head);
+
+    // ── All page_nodes: update btree_root ────────────────────────────────
+    usize pn_base = sizeof(nodepool_header);
+    usize pn_end  = header->page_alloc_offset;
+    for (usize off = pn_base; off < pn_end; off += sizeof(page_node)) {
+        page_node *pn = (page_node *)(scope_ptr->nodepool_base + off);
+        REINDEX(pn->btree_root);
+    }
+
+    // ── All allocated btree_nodes: update child / chain indices ──────────
+    // After memmove the live btree_nodes reside in [btree_alloc_offset, new_capacity).
+    // Iterate by offset (24-byte stride) and patch every index field.
+    usize bt_start = header->btree_alloc_offset;
+    usize bt_end   = new_capacity;
+    for (usize off = bt_start; off < bt_end; off += sizeof(sc_node)) {
+        sc_node *node = (sc_node *)(scope_ptr->nodepool_base + off);
+        REINDEX(node->left_idx);
+        REINDEX(node->right_idx);
+        if (node->info & FRAME_NODE_FLAG) {
+            REINDEX(node->frame_data.next_chunk_idx);
+        }
+        if (node->info & FRAME_LARGE_FLAG) {
+            REINDEX(node->large_alloc_data.next_large_alloc);
+        }
+    }
+
+#undef REINDEX
+}
+
+/**
  * @brief Allocate a page_node from bottom-up region
  */
 uint16_t nodepool_alloc_page_node(scope scope_ptr) {
@@ -367,14 +445,8 @@ uint16_t nodepool_alloc_page_node(scope scope_ptr) {
         // Update header capacity
         header->capacity = new_capacity;
 
-        // btree_alloc_offset needs adjustment (grows from top)
-        // Old: capacity - btree_bytes_used
-        // New: new_capacity - btree_bytes_used
+        // Move existing btree node data to new top region
         usize btree_bytes_used = old_capacity - header->btree_alloc_offset;
-
-        // CRITICAL: Move existing btree node data to new top region
-        // Before: [old_base ... existing_btree_nodes  old_capacity]
-        // After:  [new_base ... [empty space] ... existing_btree_nodes new_capacity]
         if (btree_bytes_used > 0) {
             void *old_btree_start = (void *)((addr)header + header->btree_alloc_offset);
             void *new_btree_start = (void *)((addr)header + (new_capacity - btree_bytes_used));
@@ -383,6 +455,9 @@ uint16_t nodepool_alloc_page_node(scope scope_ptr) {
 
         // Update btree_alloc_offset to point at new top location
         header->btree_alloc_offset = new_capacity - btree_bytes_used;
+
+        // Patch every stored btree_node index by the mapping delta from capacity doubling
+        btree_reindex_after_growth(scope_ptr, old_capacity, new_capacity);
 
         // Recalculate collision check with new capacity
         next_page_offset = header->page_alloc_offset + sizeof(page_node);
@@ -442,32 +517,32 @@ node_idx nodepool_alloc_btree_node(scope scope_ptr) {
         header = (nodepool_header *)new_base;
         header->capacity = new_capacity;
 
-        // Adjust btree_alloc_offset: btree grows from top, so we need to maintain
-        // the same "distance from top" in the new larger capacity
+        // Move existing btree node data to new top region so future allocations
+        // continue downward from the new capacity ceiling.
         usize btree_bytes_used = old_capacity - header->btree_alloc_offset;
-
-        // CRITICAL: Move existing btree node data to new top region
-        // Before: [old_base ... existing_btree_nodes  old_capacity]
-        // After:  [new_base ... [empty space] ... existing_btree_nodes new_capacity]
         if (btree_bytes_used > 0) {
             void *old_btree_start = (void *)((addr)header + header->btree_alloc_offset);
             void *new_btree_start = (void *)((addr)header + (new_capacity - btree_bytes_used));
             memmove(new_btree_start, old_btree_start, btree_bytes_used);
         }
 
-        // Update btree_alloc_offset to point at new top location
+        // Update btree_alloc_offset to reflect new top location
         header->btree_alloc_offset = new_capacity - btree_bytes_used;
+
+        // The memmove changes the physical offset of every btree node.  That shifts
+        // the index mapping used by nodepool_get_btree_node (capacity-relative formula).
+        // Patch every stored btree_node index (in scope, header, page_nodes, and all
+        // btree_nodes) by the index delta caused by the capacity doubling.
+        btree_reindex_after_growth(scope_ptr, old_capacity, new_capacity);
 
         // Recalculate with new capacity
         next_btree_offset = header->btree_alloc_offset - sizeof(sc_node);
     }
 
-    // Advance allocation offset (grows down)
+    // Advance allocation pointer (grows down)
     header->btree_alloc_offset = next_btree_offset;
 
-    // Calculate index (btree_nodes index from top)
-    // Node 0 reserved as NODE_NULL sentinel
-    // Actual nodes start from capacity and grow down
+    // Calculate index (btree_nodes index from top, capacity-relative)
     usize capacity_nodes = header->capacity / sizeof(sc_node);
     usize nodes_from_top = (header->capacity - next_btree_offset) / sizeof(sc_node);
     usize idx = capacity_nodes - nodes_from_top;
@@ -538,14 +613,16 @@ btree_node nodepool_get_btree_node(scope scope_ptr, node_idx idx) {
 
     nodepool_header *header = (nodepool_header *)scope_ptr->nodepool_base;
 
-    // Calculate offset from top: capacity - (idx * sizeof(sc_node))
+    // Calculate offset from top: capacity - (capacity_nodes - idx) * NODE_SIZE
+    // After pool growth, all stored indices are patched by btree_reindex_after_growth()
+    // so this formula always maps each index to the correct post-memmove offset.
     addr base = scope_ptr->nodepool_base;
     usize capacity_nodes = header->capacity / sizeof(sc_node);
     usize offset = header->capacity - ((capacity_nodes - idx) * sizeof(sc_node));
 
-    // Bounds check against btree_alloc_offset
-    if (offset < header->btree_alloc_offset) {
-        return NULL;  // Beyond allocated region
+    // Bounds check against btree_alloc_offset (lower bound of allocated region)
+    if (offset < header->btree_alloc_offset || offset >= header->capacity) {
+        return NULL;
     }
 
     return (btree_node)(base + offset);

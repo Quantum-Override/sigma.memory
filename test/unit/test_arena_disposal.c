@@ -17,6 +17,8 @@
 
 static void set_config(FILE **log_stream) {
     *log_stream = fopen("logs/test_arena_disposal.log", "w");
+    // sigma.test framework activates its own arena (slot 2); restore R7 to SLB0.
+    Allocator.Scope.restore();
 }
 
 static void set_teardown(void) {}
@@ -82,6 +84,9 @@ void test_ads_02_dispose_multiple_arenas(void) {
     const int NUM_ARENAS = 5;
     scope arenas[NUM_ARENAS];
     
+    // Capture baseline: sigma.test arena at slot 2 counts as active
+    int baseline = count_active_arenas();
+
     // Create multiple arenas
     fprintf(stdout, "  Creating %d arenas...\n", NUM_ARENAS);
     for (int i = 0; i < NUM_ARENAS; i++) {
@@ -93,7 +98,9 @@ void test_ads_02_dispose_multiple_arenas(void) {
     
     int active_before = count_active_arenas();
     fprintf(stdout, "  Active arenas: %d\n", active_before);
-    Assert.isTrue(active_before == NUM_ARENAS, "Should have %d active arenas", NUM_ARENAS);
+    Assert.isTrue(active_before - baseline == NUM_ARENAS,
+        "Should have %d new active arenas (baseline=%d, got=%d)",
+        NUM_ARENAS, baseline, active_before - baseline);
     
     // Dispose all arenas
     fprintf(stdout, "  Disposing all %d arenas...\n", NUM_ARENAS);
@@ -103,7 +110,9 @@ void test_ads_02_dispose_multiple_arenas(void) {
     
     int active_after = count_active_arenas();
     fprintf(stdout, "  Active arenas after disposal: %d\n", active_after);
-    Assert.isTrue(active_after == 0, "All arenas should be disposed");
+    Assert.isTrue(active_after == baseline,
+        "All user arenas should be disposed (expected baseline=%d, got=%d)",
+        baseline, active_after);
     
     fprintf(stdout, "  ✓ All arenas disposed successfully\n");
 }
@@ -192,16 +201,19 @@ void test_ads_04_multiple_disposal_cycles(void) {
     }
     fprintf(stdout, "\n");
     
-    // Since we dispose before creating next, should reuse same slot (slot 2)
+    // Since we dispose before creating next, should reuse the same first slot.
+    // Note: slot 2 is occupied by sigma.test framework, so first free slot is 3.
+    int first_slot = slot_ids[0];
     int reuse_count = 0;
     for (int i = 0; i < CYCLES; i++) {
-        if (slot_ids[i] == 2) {
+        if (slot_ids[i] == first_slot) {
             reuse_count++;
         }
     }
     
-    fprintf(stdout, "  Slot 2 reused %d times (efficient reuse)\n", reuse_count);
-    Assert.isTrue(reuse_count > CYCLES / 2, "Should frequently reuse slot 2");
+    fprintf(stdout, "  Slot %d reused %d times (efficient reuse)\n", first_slot, reuse_count);
+    Assert.isTrue(reuse_count == CYCLES,
+        "Should always reuse same slot %d (got %d/%d)", first_slot, reuse_count, CYCLES);
 }
 
 /**

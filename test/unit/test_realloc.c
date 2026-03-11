@@ -90,6 +90,10 @@ void test_realloc_dispose_semantics(void) {
 // REA-04: Shrink in-place — same pointer, data preserved
 // ============================================================================
 void test_realloc_shrink_in_place(void) {
+    // sigma.test activates a per-test arena before each test case; restore to
+    // SLB0 so that alloc+realloc both operate on the same tracked scope.
+    Allocator.Scope.restore();
+
     const usize ORIG_SIZE = 512;
     const usize NEW_SIZE  = 128;
     const usize PATTERN   = 0x5C;
@@ -118,6 +122,8 @@ void test_realloc_shrink_in_place(void) {
 // REA-05: Grow — new pointer (or same), data preserved up to old size
 // ============================================================================
 void test_realloc_grow_data_integrity(void) {
+    Allocator.Scope.restore();  // ensure SLB0 is active (sigma.test per-case arena)
+
     const usize ORIG_SIZE = 64;
     const usize NEW_SIZE  = 512;
 
@@ -151,6 +157,8 @@ void test_realloc_grow_data_integrity(void) {
 // REA-06: Grow → shrink → dispose cycle; data integrity maintained
 // ============================================================================
 void test_realloc_grow_shrink_cycle(void) {
+    Allocator.Scope.restore();  // ensure SLB0 is active (sigma.test per-case arena)
+
     const usize STAGE1 = 64;
     const usize STAGE2 = 1024;   // grow
     const usize STAGE3 = 128;    // shrink
@@ -197,6 +205,8 @@ void test_realloc_grow_shrink_cycle(void) {
 // Shrink by only 16 bytes → remainder (16) < 32 → no split; same ptr, same size.
 // ============================================================================
 void test_realloc_undersized_remainder_no_split(void) {
+    Allocator.Scope.restore();  // ensure SLB0 is active (sigma.test per-case arena)
+
     // Allocate a block whose size is aligned to 32 bytes
     const usize ORIG_SIZE = 64;    // 64 bytes
     const usize NEW_SIZE  = 48;    // shrink by 16 → remainder = 16 < 32 → no split
@@ -217,6 +227,8 @@ void test_realloc_undersized_remainder_no_split(void) {
 // REA-08: Multiple independent realloc chains don't interfere
 // ============================================================================
 void test_realloc_independent_chains(void) {
+    Allocator.Scope.restore();  // ensure SLB0 is active (sigma.test per-case arena)
+
     const int N = 8;
     object ptrs[N];
 

@@ -48,29 +48,30 @@
 // Per-page capacity with ALLOC_BLOCK_SIZE:
 //   usable = SYS0_PAGE_SIZE - sizeof(sc_page_sentinel) = 8192 - 32 = 8160
 //   blocks = floor(8160 / 256) = 31
-#define SLB0_INITIAL_PAGES   16u
-#define ALLOC_BLOCK_SIZE     256u
-#define BLOCKS_PER_PAGE      31u
+#define SLB0_INITIAL_PAGES 16u
+#define ALLOC_BLOCK_SIZE 256u
+#define BLOCKS_PER_PAGE 31u
 
 // Threshold address separating initial-block pages from dynamic pages
-#define dynamic_threshold(slb0) \
-    ((slb0)->first_page_off + (16u * (usize)SYS0_PAGE_SIZE))
+#define dynamic_threshold(slb0) ((slb0)->first_page_off + (16u * (usize)SYS0_PAGE_SIZE))
 
 // True if an allocation resides on a dynamic (non-initial) page
-#define is_dynamic_alloc(ptr, slb0) \
-    ((addr)(ptr) >= dynamic_threshold(slb0))
+#define is_dynamic_alloc(ptr, slb0) ((addr)(ptr) >= dynamic_threshold(slb0))
 
 // Upper bound on allocations needed to reach a dynamic page (with headroom)
-#define MAX_FILL  640
+#define MAX_FILL 640
 
 #if 1  // Region: Test Set Setup & Teardown
 static void set_config(FILE **log_stream) {
     *log_stream = fopen("logs/test_page_release.log", "w");
+    // sigma.test framework pre-activates its own arena; restore R7 to SLB0.
+    Allocator.Scope.restore();
     sbyte state = Memory.state();
     Assert.isTrue(state & MEM_STATE_READY, "Memory system must be ready");
 }
 
-static void set_teardown(void) {}
+static void set_teardown(void) {
+}
 #endif
 
 #if 1  // Region: PRL - Page Release Tests
@@ -83,8 +84,8 @@ void test_slb0_initial_page_count(void) {
     Assert.isNotNull(slb0, "PRL-01: SLB0 scope must be accessible");
 
     Assert.isTrue(slb0->page_count == SLB0_INITIAL_PAGES,
-        "PRL-01: Expected %u initial pages, got %zu",
-        SLB0_INITIAL_PAGES, slb0->page_count);
+                  "PRL-01: Expected %u initial pages, got %zu", SLB0_INITIAL_PAGES,
+                  slb0->page_count);
 }
 
 // ============================================================================
@@ -94,6 +95,9 @@ void test_slb0_initial_page_count(void) {
 // ranges here because valgrind's mmap assignments can differ from native Linux.
 // ============================================================================
 void test_dynamic_page_created_on_overflow(void) {
+    // sigma.test activates sigtest_arena before each case; restore to SLB0.
+    Allocator.Scope.restore();
+
     scope slb0 = Memory.get_scope(1);
     Assert.isNotNull(slb0, "PRL-02: SLB0 must be accessible");
 
@@ -116,11 +120,11 @@ void test_dynamic_page_created_on_overflow(void) {
     }
 
     Assert.isTrue(overflowed,
-        "PRL-02: page_count should have increased from %zu within %d allocs (got %zu)",
-        start_count, MAX_FILL, slb0->page_count);
+                  "PRL-02: page_count should have increased from %zu within %d allocs (got %zu)",
+                  start_count, MAX_FILL, slb0->page_count);
 
-    printf("  PRL-02: %d allocs created dynamic page (page_count %zu → %zu)\n",
-           n, start_count, slb0->page_count);
+    printf("  PRL-02: %d allocs created dynamic page (page_count %zu → %zu)\n", n, start_count,
+           slb0->page_count);
 
     // Cleanup (also frees the dynamic page via alloc_count drop)
     for (int i = 0; i < n; i++) {
@@ -170,8 +174,8 @@ void test_dynamic_page_released_when_empty(void) {
     }
 
     usize count_with_dynamic = slb0->page_count;
-    printf("  PRL-03: dynamic alloc at index %d (page_count=%zu)\n",
-           first_dynamic, count_with_dynamic);
+    printf("  PRL-03: dynamic alloc at index %d (page_count=%zu)\n", first_dynamic,
+           count_with_dynamic);
 
     // Free ONLY the dynamic-page allocations
     for (int i = first_dynamic; i < n; i++) {
@@ -180,12 +184,12 @@ void test_dynamic_page_released_when_empty(void) {
     }
 
     usize count_after_release = slb0->page_count;
-    Assert.isTrue(count_after_release < count_with_dynamic,
+    Assert.isTrue(
+        count_after_release < count_with_dynamic,
         "PRL-03: Dynamic page should be released; page_count should drop from %zu (got %zu)",
         count_with_dynamic, count_after_release);
 
-    printf("  PRL-03: page_count: %zu → %zu (released)\n",
-           count_with_dynamic, count_after_release);
+    printf("  PRL-03: page_count: %zu → %zu (released)\n", count_with_dynamic, count_after_release);
 
     // Cleanup initial-page allocations
     for (int i = 0; i < first_dynamic; i++) {
@@ -230,8 +234,8 @@ void test_initial_pages_not_released(void) {
 
     // Regardless of state, the initial 16-page block must NEVER be individually munmap'd
     Assert.isTrue(after_count >= 16u,
-        "PRL-04: Initial pages must persist; page_count should be >= 16, got %zu",
-        after_count);
+                  "PRL-04: Initial pages must persist; page_count should be >= 16, got %zu",
+                  after_count);
 
     printf("  PRL-04: %d initial-page allocs freed; page_count %zu → %zu (>= 16 required)\n",
            landed, before_count, after_count);
@@ -241,6 +245,9 @@ void test_initial_pages_not_released(void) {
 // PRL-05: SLB0 remains usable after a dynamic page is released
 // ============================================================================
 void test_allocations_succeed_after_page_release(void) {
+    // sigma.test activates sigtest_arena before each case; restore to SLB0.
+    Allocator.Scope.restore();
+
     scope slb0 = Memory.get_scope(1);
     Assert.isNotNull(slb0, "PRL-05: SLB0 must be accessible");
 
@@ -267,7 +274,8 @@ void test_allocations_succeed_after_page_release(void) {
 
     if (dyn_ptr == NULL) {
         printf("  PRL-05: could not trigger dynamic page; skipping\n");
-        for (int i = 0; i < n; i++) if (fill[i]) Allocator.dispose(fill[i]);
+        for (int i = 0; i < n; i++)
+            if (fill[i]) Allocator.dispose(fill[i]);
         free(fill);
         return;
     }
@@ -277,8 +285,8 @@ void test_allocations_succeed_after_page_release(void) {
     usize count_after_release = slb0->page_count;
 
     Assert.isTrue(count_after_release < count_before,
-        "PRL-05: Expected page release; count %zu → %zu",
-        count_before, count_after_release);
+                  "PRL-05: Expected page release; count %zu → %zu", count_before,
+                  count_after_release);
 
     // Verify SLB0 still works
     const int VERIFY = 16;
@@ -292,8 +300,8 @@ void test_allocations_succeed_after_page_release(void) {
         Allocator.dispose(vptrs[i]);
     }
 
-    printf("  PRL-05: %d post-release allocs succeeded (page_count=%zu → %zu → %zu)\n",
-           VERIFY, count_before, count_after_release, slb0->page_count);
+    printf("  PRL-05: %d post-release allocs succeeded (page_count=%zu → %zu → %zu)\n", VERIFY,
+           count_before, count_after_release, slb0->page_count);
 
     // Cleanup fill
     for (int i = 0; i < n - 1; i++) {
@@ -308,10 +316,10 @@ void test_allocations_succeed_after_page_release(void) {
 __attribute__((constructor)) void init_page_release_tests(void) {
     testset("Unit: SLB0 Dynamic Page Release", set_config, set_teardown);
 
-    testcase("PRL-01: SLB0 starts with 16 pages",              test_slb0_initial_page_count);
-    testcase("PRL-02: Overflow creates dynamic page",           test_dynamic_page_created_on_overflow);
-    testcase("PRL-03: Dynamic page released when empty",        test_dynamic_page_released_when_empty);
+    testcase("PRL-01: SLB0 starts with 16 pages", test_slb0_initial_page_count);
+    testcase("PRL-02: Overflow creates dynamic page", test_dynamic_page_created_on_overflow);
+    testcase("PRL-03: Dynamic page released when empty", test_dynamic_page_released_when_empty);
     testcase("PRL-04: Initial pages not individually released", test_initial_pages_not_released);
-    testcase("PRL-05: SLB0 usable after page release",         test_allocations_succeed_after_page_release);
+    testcase("PRL-05: SLB0 usable after page release", test_allocations_succeed_after_page_release);
 }
 #endif

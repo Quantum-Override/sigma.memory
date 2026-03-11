@@ -31,6 +31,8 @@
 
 static void set_config(FILE **log_stream) {
     *log_stream = fopen("logs/test_scope_interface.log", "w");
+    // sigma.test framework pre-activates its own arena; restore R7 to SLB0.
+    Allocator.Scope.restore();
 }
 
 static void set_teardown(void) {
@@ -105,6 +107,9 @@ void test_si_04_scope_set_pushes_r7(void) {
      * Scope.set(s) should save the current R7 onto the R7 stack
      * and update R7 to s, making restore() possible after.
      */
+    // sigma.test activates sigtest_arena before each case; restore to SLB0.
+    Allocator.Scope.restore();
+
     scope slb0 = Allocator.Scope.current();
     Assert.isNotNull(slb0, "SI-04: initial scope must be valid");
 
@@ -177,7 +182,7 @@ void test_si_06_set_on_active_scope_returns_err(void) {
     // arena->prev == slb0 (set by create), so it is already active.
     // A second Scope.set(arena) must fail.
     integer rc = Allocator.Scope.set(arena);
-    Assert.isTrue(rc == ERR,   "SI-06: set on already-active scope must return ERR");
+    Assert.isTrue(rc == ERR, "SI-06: set on already-active scope must return ERR");
     Assert.isTrue(Allocator.Scope.current() == arena, "SI-06: R7 unchanged after failed set");
 
     // System remains usable; normal dispose restores R7 to slb0
@@ -193,5 +198,6 @@ __attribute__((constructor)) void init_test(void) {
     testcase("SI-03: Arena.dispose restores R7", test_si_03_dispose_arena_restores_r7);
     testcase("SI-04: Scope.set pushes R7 stack", test_si_04_scope_set_pushes_r7);
     testcase("SI-05: Scope.restore pops R7 LIFO", test_si_05_scope_restore_is_lifo);
-    testcase("SI-06: set on already-active scope returns ERR", test_si_06_set_on_active_scope_returns_err);
+    testcase("SI-06: set on already-active scope returns ERR",
+             test_si_06_set_on_active_scope_returns_err);
 }

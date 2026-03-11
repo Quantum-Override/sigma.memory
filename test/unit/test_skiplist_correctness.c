@@ -51,20 +51,23 @@
 
 // ─── sizing: one page worth of 256-byte allocs ────────────────────────────
 // Per page: (8192 - 32) / 256 = 31 blocks exactly fill the page
-#define SMALL_SIZE        32u    // Small alloc that packs densely
-#define MEDIUM_SIZE       256u   // Medium alloc (31 per page)
-#define LARGE_SIZE        1024u  // Request that exceeds individual SMALL_SIZE fragments
-#define SMALL_PER_PAGE    255u   // floor((8192 - 32) / 32) — fills bump completely
-#define MEDIUM_PER_PAGE   31u    // floor((8192 - 32) / 256)
+#define SMALL_SIZE 32u       // Small alloc that packs densely
+#define MEDIUM_SIZE 256u     // Medium alloc (31 per page)
+#define LARGE_SIZE 1024u     // Request that exceeds individual SMALL_SIZE fragments
+#define SMALL_PER_PAGE 255u  // floor((8192 - 32) / 32) — fills bump completely
+#define MEDIUM_PER_PAGE 31u  // floor((8192 - 32) / 256)
 
 #if 1  // Region: Test Set Setup & Teardown
 static void set_config(FILE **log_stream) {
     *log_stream = fopen("logs/test_skiplist_correctness.log", "w");
+    // sigma.test framework pre-activates its own arena; restore R7 to SLB0.
+    Allocator.Scope.restore();
     sbyte state = Memory.state();
     Assert.isTrue(state & MEM_STATE_READY, "Memory system must be ready");
 }
 
-static void set_teardown(void) {}
+static void set_teardown(void) {
+}
 
 // Helper: is `ptr` within the given page?
 static bool ptr_on_page(const void *ptr, addr page_base) {
@@ -113,12 +116,12 @@ void test_btree_free_blocks_reused(void) {
 
     // No new pages should have been created — allocations came from free blocks
     Assert.isTrue(page_count_after_realloc <= page_count_after_free + 1,
-        "SLC-01: page_count should not grow significantly on B-tree reuse "
-        "(was %zu, now %zu)",
-        page_count_after_free, page_count_after_realloc);
+                  "SLC-01: page_count should not grow significantly on B-tree reuse "
+                  "(was %zu, now %zu)",
+                  page_count_after_free, page_count_after_realloc);
 
-    printf("  SLC-01: page_count: before=%zu free=%zu realloc=%zu\n",
-           page_count_before, page_count_after_free, page_count_after_realloc);
+    printf("  SLC-01: page_count: before=%zu free=%zu realloc=%zu\n", page_count_before,
+           page_count_after_free, page_count_after_realloc);
 
     // Cleanup
     for (usize i = 0; i < MEDIUM_PER_PAGE; i++) {
@@ -162,13 +165,14 @@ void test_coalesced_free_blocks_serve_larger_alloc(void) {
 
     // Should not have required a new page if the coalesced free block was found
     Assert.isTrue(count_after_alloc <= count_before_free + 1,
-        "SLC-02: page_count should be stable when coalesced block exists "
-        "(was %zu, now %zu)", count_before_free, count_after_alloc);
+                  "SLC-02: page_count should be stable when coalesced block exists "
+                  "(was %zu, now %zu)",
+                  count_before_free, count_after_alloc);
 
-    printf("  SLC-02: Coalesced %zu × %u → served %zu-byte alloc; "
-           "page_count=%zu→%zu\n",
-           BLOCK_COUNT, MEDIUM_SIZE, COALESCED_SIZE,
-           count_before_free, count_after_alloc);
+    printf(
+        "  SLC-02: Coalesced %zu × %u → served %zu-byte alloc; "
+        "page_count=%zu→%zu\n",
+        BLOCK_COUNT, MEDIUM_SIZE, COALESCED_SIZE, count_before_free, count_after_alloc);
 
     Allocator.dispose(big);
 }
@@ -193,6 +197,9 @@ void test_coalesced_free_blocks_serve_larger_alloc(void) {
 //     page 1 as a candidate even though no LARGE_SIZE block was available.
 // ============================================================================
 void test_fragmented_page_skipped_for_large_request(void) {
+    // sigma.test activates sigtest_arena before each case; restore to SLB0.
+    Allocator.Scope.restore();
+
     scope slb0 = Memory.get_scope(1);
     Assert.isNotNull(slb0, "SLC-03: SLB0 must be accessible");
 
@@ -204,10 +211,9 @@ void test_fragmented_page_skipped_for_large_request(void) {
         ptrs[i] = Allocator.alloc(SMALL_SIZE);
         Assert.isNotNull(ptrs[i], "SLC-03: Fill alloc %zu should succeed", i);
         // Sanity: all fill allocs should be on the initial pages
-        Assert.isTrue(
-            (addr)ptrs[i] >= page1_base &&
-            (addr)ptrs[i] < page1_base + (16u * (usize)SYS0_PAGE_SIZE),
-            "SLC-03: Fill alloc %zu should be on an initial page", i);
+        Assert.isTrue((addr)ptrs[i] >= page1_base &&
+                          (addr)ptrs[i] < page1_base + (16u * (usize)SYS0_PAGE_SIZE),
+                      "SLC-03: Fill alloc %zu should be on an initial page", i);
     }
 
     // Step 2: Free every other block — creates SMALL_SIZE gaps that cannot
@@ -228,17 +234,14 @@ void test_fragmented_page_skipped_for_large_request(void) {
 
     bool on_page1 = ptr_on_page(large_ptr, page1_base);
     Assert.isFalse(on_page1,
-        "SLC-03 (Task 7 regression): Large alloc should NOT be on fragmented page 1 "
-        "(ptr=0x%lx page1=[0x%lx, 0x%lx))",
-        (unsigned long)(addr)large_ptr,
-        (unsigned long)page1_base,
-        (unsigned long)(page1_base + SYS0_PAGE_SIZE));
+                   "SLC-03 (Task 7 regression): Large alloc should NOT be on fragmented page 1 "
+                   "(ptr=0x%lx page1=[0x%lx, 0x%lx))",
+                   (unsigned long)(addr)large_ptr, (unsigned long)page1_base,
+                   (unsigned long)(page1_base + SYS0_PAGE_SIZE));
 
     printf("  SLC-03: large_ptr=0x%lx page1=[0x%lx,0x%lx) on_page1=%s\n",
-           (unsigned long)(addr)large_ptr,
-           (unsigned long)page1_base,
-           (unsigned long)(page1_base + SYS0_PAGE_SIZE),
-           on_page1 ? "YES (FAIL)" : "NO (pass)");
+           (unsigned long)(addr)large_ptr, (unsigned long)page1_base,
+           (unsigned long)(page1_base + SYS0_PAGE_SIZE), on_page1 ? "YES (FAIL)" : "NO (pass)");
 
     Allocator.dispose(large_ptr);
 
@@ -286,11 +289,11 @@ void test_full_fill_free_realloc_no_new_page(void) {
 
     // No new dynamic pages should appear
     Assert.isTrue(count_after_realloc <= count_after_free + 1,
-        "SLC-04: No new pages expected (free=%zu realloc=%zu)",
-        count_after_free, count_after_realloc);
+                  "SLC-04: No new pages expected (free=%zu realloc=%zu)", count_after_free,
+                  count_after_realloc);
 
-    printf("  SLC-04: page_count after_free=%zu after_realloc=%zu\n",
-           count_after_free, count_after_realloc);
+    printf("  SLC-04: page_count after_free=%zu after_realloc=%zu\n", count_after_free,
+           count_after_realloc);
 
     // Cleanup
     for (usize i = 0; i < MEDIUM_PER_PAGE; i++) {

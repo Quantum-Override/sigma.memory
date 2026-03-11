@@ -27,10 +27,15 @@
 
 #include <sigma.test/sigtest.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include "internal/memory.h"
+#include "internal/node_pool.h"
 #include "memory.h"
 
 static void set_config(FILE **log_stream) {
     *log_stream = fopen("logs/test_janky.log", "w");
+    // sigma.test framework pre-activates its own arena; restore R7 to SLB0.
+    Allocator.Scope.restore();
 }
 
 static void set_teardown(void) {
@@ -44,6 +49,7 @@ void test_jk_01_frame_in_slb0_while_arena_current(void) {
      * via Scope.alloc(slb0, ...) must be tracked by the SLB0 frame,
      * while Allocator.alloc() routes to the arena.
      */
+    Allocator.Scope.restore();  // ensure SLB0 is starting scope
     scope slb0 = Allocator.Scope.current();
     Assert.isNotNull(slb0, "JK-01: SLB0 must be valid");
 
@@ -191,6 +197,7 @@ void test_jk_05_non_frame_allocs_survive_frame_end(void) {
      * and must NOT be freed when Frame.end() is called.  Only allocations
      * made after begin() and before end() belong to the frame.
      */
+    Allocator.Scope.restore();  // ensure SLB0 is starting scope
     scope slb0 = Allocator.Scope.current();
     Assert.isNotNull(slb0, "JK-05: SLB0 must be valid");
 
@@ -222,8 +229,153 @@ void test_jk_05_non_frame_allocs_survive_frame_end(void) {
 }
 #endif
 
+#if 1  // Region: JK-DBG - B-tree tracking reproduction apparatus
+/*
+ * These tests atomize the exact failure scenario exposed by PRL-05:
+ *
+ *   slb0_alloc bumps alloc_count on the page sentinel, then calls
+ *   btree_page_insert to register the allocation in the page's B-tree.
+ *   When btree_page_insert fails silently (e.g. nodepool exhausted or
+ *   mremap moved the pool), alloc_count is non-zero but the B-tree has
+ *   no entry.  slb0_dispose then cannot find the node, returns early
+ *   without decrementing alloc_count, and the page is never released.
+ *
+ * DBG-01: isolate the tracking contract for a single allocation.
+ * DBG-02: reproduce the full PRL-05 scenario (fill → dynamic page →
+ *         verify B-tree → dispose → verify page release).
+ */
+
+// ============================================================================
+// JK-DBG-01: B-tree correctly tracks a single SLB0 allocation
+// ============================================================================
+void test_jk_dbg_01_btree_tracks_slb0_alloc(void) {
+    Allocator.Scope.restore();
+    scope slb0 = Memory.get_scope(1);
+    Assert.isNotNull(slb0, "DBG-01: SLB0 must be accessible");
+
+    // ── allocate one block ────────────────────────────────────────────────
+    object ptr = Allocator.alloc(256);
+    Assert.isNotNull(ptr, "DBG-01: alloc must succeed");
+
+    // ── the skip list must know which page owns this pointer ──────────────
+    uint16_t page_idx = PAGE_NODE_NULL;
+    int skip_rc = skiplist_find_containing(slb0, (addr)ptr, &page_idx);
+    Assert.isTrue(skip_rc == OK,
+        "DBG-01: skiplist_find_containing must succeed (rc=%d)", skip_rc);
+
+    // ── the page's B-tree must have a node for this exact address ─────────
+    node_idx nidx = NODE_NULL;
+    int btree_rc = btree_page_search(slb0, page_idx, (addr)ptr, &nidx);
+    Assert.isTrue(btree_rc == OK,
+        "DBG-01: btree_page_search must find allocation on page %u (rc=%d)",
+        page_idx, btree_rc);
+
+    // ── page sentinel must reflect the live allocation ────────────────────
+    page_node *pn = nodepool_get_page_node(slb0, page_idx);
+    Assert.isNotNull(pn, "DBG-01: page_node must exist");
+    page_sentinel ps = (page_sentinel)pn->page_base;
+    Assert.isTrue(ps->alloc_count >= 1,
+        "DBG-01: page sentinel alloc_count must be >= 1 (got %u)", ps->alloc_count);
+
+    printf("  DBG-01: page_idx=%u alloc_count=%u B-tree node=%u ptr=%p\n",
+           page_idx, ps->alloc_count, nidx, ptr);
+
+    // ── dispose must decrement alloc_count ───────────────────────────────
+    uint16_t ac_before = ps->alloc_count;
+    Allocator.dispose(ptr);
+    Assert.isTrue(ps->alloc_count < ac_before,
+        "DBG-01: alloc_count must decrease after dispose (%u → %u)",
+        ac_before, ps->alloc_count);
+}
+
+// ============================================================================
+// JK-DBG-02: B-tree tracks the first alloc on a new dynamic page;
+//             disposing that alloc releases the page (page_count --)
+// ============================================================================
+void test_jk_dbg_02_dynamic_page_btree_and_release(void) {
+    Allocator.Scope.restore();
+    scope slb0 = Memory.get_scope(1);
+    Assert.isNotNull(slb0, "DBG-02: SLB0 must be accessible");
+
+    usize start_count = slb0->page_count;
+
+    // ── fill until page_count increases (new dynamic page created) ────────
+    const int MAX = 1024;
+    void **ptrs = (void **)malloc(MAX * sizeof(void *));
+    Assert.isNotNull(ptrs, "DBG-02: helper alloc failed");
+
+    int n = 0;
+    void *dyn_ptr = NULL;
+
+    while (n < MAX) {
+        ptrs[n] = Allocator.alloc(256);
+        Assert.isNotNull(ptrs[n], "DBG-02: alloc %d failed", n);
+        if (slb0->page_count > start_count && dyn_ptr == NULL) {
+            dyn_ptr = ptrs[n];
+            ptrs[n] = NULL;  // don't double-free via cleanup loop
+        }
+        n++;
+        if (dyn_ptr != NULL)
+            break;
+    }
+
+    Assert.isNotNull(dyn_ptr,
+        "DBG-02: page_count must increase within %d allocs (remained %zu)",
+        MAX, slb0->page_count);
+
+    printf("  DBG-02: dynamic alloc at n=%d  page_count=%zu  dyn_ptr=%p\n",
+           n - 1, slb0->page_count, dyn_ptr);
+
+    // ── the skip list must find the dynamic page ──────────────────────────
+    uint16_t page_idx = PAGE_NODE_NULL;
+    int skip_rc = skiplist_find_containing(slb0, (addr)dyn_ptr, &page_idx);
+    Assert.isTrue(skip_rc == OK,
+        "DBG-02: skiplist must find dynamic page for dyn_ptr (rc=%d)", skip_rc);
+
+    // ── the B-tree must have an entry for dyn_ptr ─────────────────────────
+    node_idx nidx = NODE_NULL;
+    int btree_rc = btree_page_search(slb0, page_idx, (addr)dyn_ptr, &nidx);
+    Assert.isTrue(btree_rc == OK,
+        "DBG-02: B-tree must track dyn_ptr on page %u (rc=%d)", page_idx, btree_rc);
+
+    page_node *pn = nodepool_get_page_node(slb0, page_idx);
+    Assert.isNotNull(pn, "DBG-02: page_node must exist");
+    page_sentinel ps = (page_sentinel)pn->page_base;
+
+    printf("  DBG-02: page_idx=%u alloc_count=%u B-tree node=%u\n",
+           page_idx, ps->alloc_count, nidx);
+
+    // ── free all fill allocs except dyn_ptr ───────────────────────────────
+    for (int i = 0; i < n - 1; i++) {
+        if (ptrs[i])
+            Allocator.dispose(ptrs[i]);
+    }
+    free(ptrs);
+
+    // ── dispose dyn_ptr — its page must be released (page_count --) ───────
+    usize count_before = slb0->page_count;
+    Allocator.dispose(dyn_ptr);
+    usize count_after = slb0->page_count;
+
+    Assert.isTrue(count_after < count_before,
+        "DBG-02: dynamic page must release after last alloc disposed "
+        "(page_count %zu → %zu)",
+        count_before, count_after);
+
+    printf("  DBG-02: page_count %zu → %zu (dynamic page released)\n",
+           count_before, count_after);
+}
+#endif  // Region: JK-DBG
+
 __attribute__((constructor)) void init_test(void) {
     testset("Janky: Mixed-Scope Usage", set_config, set_teardown);
+    // DBG tests run first — they require a clean SLB0 state (page_count == 16).
+    // JK-01..05 may leak dynamic pages if their alloc_count desync is present,
+    // so DBG tests must execute before any JK test dirtied the SLB0 state.
+    testcase("JK-DBG-01: B-tree tracks a single SLB0 alloc",
+             test_jk_dbg_01_btree_tracks_slb0_alloc);
+    testcase("JK-DBG-02: B-tree tracks first dynamic-page alloc; dispose releases page",
+             test_jk_dbg_02_dynamic_page_btree_and_release);
     testcase("JK-01: frame in SLB0 while arena current",
              test_jk_01_frame_in_slb0_while_arena_current);
     testcase("JK-02: alloc() routes to current scope", test_jk_02_alloc_routes_to_current_scope);
