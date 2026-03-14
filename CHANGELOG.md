@@ -4,6 +4,21 @@ All notable changes to Sigma.Memory are documented here. Full release notes for 
 
 ---
 
+## [0.2.4] - 2026-03-14
+
+**Resource Scopes + Scope Promotion + Arena Hot-Path Optimization**
+
+- Added `Allocator.Resource` sub-interface (FT-12): private mmap-backed bump scopes for
+  short-lived bulk allocations; `acquire/alloc/reset/release/frame_begin/frame_end`
+- Added `Allocator.promote(ptr, size, dst)` (FT-14): copy an allocation from any source
+  (frame, resource scope, stack buffer) into a target scope with a single call;
+  dispatches on `dst->policy` — no source type is required
+- Arena O(1) bump allocation (FT-15): `sc_scope.current_page_idx` caches the NodePool
+  page index, replacing a skip list traversal (`O(log n)`) on every arena alloc with a
+  direct `nodepool_get_page_node` call (`O(1)`)
+- Test coverage: 44 tests, 100% passing, Valgrind clean
+- New test suites: `test_scope_interface.c` (RS-01–RS-11), `test_promote.c` (PM-01–PM-09)
+
 ## [0.2.3] - 2026-03-09
 
 **Realloc API + Dynamic Page Release + Skip List Correctness**

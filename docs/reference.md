@@ -279,24 +279,26 @@ typedef struct sc_frame_state {
 } sc_frame_state;  // 12 bytes
 
 typedef struct sc_scope {
-    usize scope_id;         //  8: Index in scope_table
-    sbyte policy;           //  1: SCOPE_POLICY_*
-    sbyte flags;            //  1: SCOPE_FLAG_* bitmask
-    sbyte _pad[6];          //  6: Alignment
-    addr first_page_off;    //  8: First page address
-    addr current_page_off;  //  8: Current (active) page
-    usize page_count;       //  8: Pages in chain
-    char name[16];          // 16: Inline name
-    
-    // Frame support (v0.2.1+)
-    uint16_t current_frame_idx;  //  2: Active frame chunk
-    uint16_t current_chunk_idx;  //  2: Current chunk in frame
-    uint16_t frame_counter;      //  2: Next frame_id
-    uint16_t frame_depth;        //  2: Current nesting depth (0-16)
-    sc_frame_state frame_stack[16]; // 192: LIFO frame stack
-    
-    addr reserved[1];       //  8: Reserved (future extensions)
-} sc_scope;                 // Total: 256 bytes (expanded from 64)
+    usize scope_id;             //  8: Index in scope_table (0=SYS0, 1=SLB0, 2-15=user arenas)
+    sbyte policy;               //  1: SCOPE_POLICY_* (immutable after creation)
+    sbyte flags;                //  1: SCOPE_FLAG_* bitmask (mutable)
+    uint16_t current_page_idx;  //  2: Cached NodePool index of current page (PAGE_NODE_NULL=none)
+    sbyte _pad[4];              //  4: Alignment padding
+    addr first_page_off;        //  8: Base address of first page in chain
+    addr current_page_off;      //  8: Base address of current (active) page
+    usize page_count;           //  8: Total pages in chain
+    char name[16];              // 16: Inline scope name (null-terminated, max 15 chars)
+    addr nodepool_base;         //  8: Base address of per-scope NodePool mmap
+
+    // Frame support (v0.2.3: single active frame per scope)
+    uint16_t current_frame_idx; //  2: Head chunk node index (NODE_NULL when no frame active)
+    uint16_t current_chunk_idx; //  2: Current bump chunk (may differ from head after chaining)
+    uint16_t frame_counter;     //  2: Monotonic frame ID generator (never reset)
+    bool frame_active;          //  1: True when a frame is open on this scope
+    uint8_t _frame_pad;         //  1: Alignment padding
+    scope prev;                 //  8: Previous scope in activation chain (NULL = root)
+    sc_frame_state active_frame;//  16: Current frame state (valid only when frame_active)
+} sc_scope;                     // Total: 96 bytes
 
 // Frame constants
 #define FRAME_CHUNK_SIZE 4096  // 4KB per chunk

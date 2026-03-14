@@ -826,6 +826,7 @@ static page_node *scope_alloc_tracked_page(scope s) {
         s->first_page_off = pn->page_base;
     }
     s->current_page_off = pn->page_base;
+    s->current_page_idx = page_idx;  // Cache for O(1) arena bump path (v0.2.4)
     s->page_count++;
 
     return pn;
@@ -1368,19 +1369,17 @@ static object arena_alloc(scope arena, usize size) {
         arena->active_frame.total_allocated += aligned_size;
     }
 
-    // Try to bump-allocate from the current page
-    if (arena->current_page_off != 0) {
-        uint16_t page_idx = PAGE_NODE_NULL;
-        if (skiplist_find_containing(arena, arena->current_page_off, &page_idx) == OK) {
-            page_node *pn = nodepool_get_page_node(arena, page_idx);
-            if (pn != NULL) {
-                usize available = SYS0_PAGE_SIZE - pn->bump_offset;
-                if (available >= aligned_size) {
-                    object ptr = (object)(pn->page_base + pn->bump_offset);
-                    pn->bump_offset += (uint16_t)aligned_size;
-                    pn->alloc_count++;
-                    return ptr;
-                }
+    // Try to bump-allocate from the current page.
+    // O(1) direct index lookup via cached current_page_idx — no skip list traversal.
+    if (arena->current_page_idx != PAGE_NODE_NULL) {
+        page_node *pn = nodepool_get_page_node(arena, arena->current_page_idx);
+        if (pn != NULL) {
+            usize available = SYS0_PAGE_SIZE - pn->bump_offset;
+            if (available >= aligned_size) {
+                object ptr = (object)(pn->page_base + pn->bump_offset);
+                pn->bump_offset += (uint16_t)aligned_size;
+                pn->alloc_count++;
+                return ptr;
             }
         }
     }

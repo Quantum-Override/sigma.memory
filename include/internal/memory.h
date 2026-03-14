@@ -229,17 +229,19 @@ typedef struct sc_frame_state {
 // Layout: scope_table[0]=SYS0, scope_table[1]=SLB0, [2-15]=user arenas
 // The slab_table[i] array parallels scope_table[i] with page-0 addresses
 typedef struct sc_scope {
-    usize scope_id;         // 8: Unique ID (matches index in scope_table)
-    sbyte policy;           // 1: SCOPE_POLICY_* (immutable after creation)
-    sbyte flags;            // 1: SCOPE_FLAG_* bitmask (mutable)
-    sbyte _pad[6];          // 6: Alignment padding
-    addr first_page_off;    // 8: Offset to first page's sentinel
-    addr current_page_off;  // 8: Offset to current (last active) page
+    usize scope_id;             // 8: Unique ID (matches index in scope_table)
+    sbyte policy;               // 1: SCOPE_POLICY_* (immutable after creation)
+    sbyte flags;                // 1: SCOPE_FLAG_* bitmask (mutable)
+    uint16_t current_page_idx;  // 2: Cached NodePool index of current page (PAGE_NODE_NULL = none)
+    sbyte _pad[4];              // 4: Alignment padding
+    addr first_page_off;        // 8: Offset to first page's sentinel
+    addr current_page_off;      // 8: Offset to current (last active) page base address
     usize page_count;       // 8: Number of pages in chain
     char name[16];          // 16: Inline scope name (null-terminated)
     addr nodepool_base;     // 8: Base address of per-scope NodePool mmap
 
     // Frame support (v0.2.3: single active frame per scope; prev-chain replaces R7 stack)
+    // Note: current_page_idx (offset 10) enables O(1) arena bump allocation (v0.2.4)
     uint16_t current_frame_idx;   // Head chunk node index (NODE_NULL when no frame active)
     uint16_t current_chunk_idx;   // Current bump chunk (may differ from head after chaining)
     uint16_t frame_counter;       // Monotonic frame ID generator (never reset)
@@ -256,27 +258,27 @@ _Static_assert(sizeof(sc_scope) == SCOPE_ENTRY_SIZE,
 // nodepool_base is always ADDR_EMPTY; prev is always NULL (never enters R7 chain).
 typedef struct sc_rscope *rscope;
 typedef struct sc_rscope {
-    usize scope_id;       // 8: Unique ID (matches index in scope_table)
-    sbyte policy;         // 1: Always SCOPE_POLICY_RESOURCE (immutable)
-    sbyte flags;          // 1: SCOPE_FLAG_* bitmask (mutable)
-    sbyte _pad[6];        // 6: Alignment padding — matches sc_scope offset exactly
+    usize scope_id;  // 8: Unique ID (matches index in scope_table)
+    sbyte policy;    // 1: Always SCOPE_POLICY_RESOURCE (immutable)
+    sbyte flags;     // 1: SCOPE_FLAG_* bitmask (mutable)
+    sbyte _pad[6];   // 6: Alignment padding — matches sc_scope offset exactly
 
-    addr  slab_base;      // 8: Base address of mmap'd slab
-    addr  bump_pos;       // 8: Current allocation pointer (advances on each alloc)
+    addr slab_base;       // 8: Base address of mmap'd slab
+    addr bump_pos;        // 8: Current allocation pointer (advances on each alloc)
     usize slab_capacity;  // 8: Total slab size in bytes (fixed at acquire)
-    char  name[16];       // 16: Inline scope name (null-terminated)
+    char name[16];        // 16: Inline scope name (null-terminated)
 
-    addr  nodepool_base;  // 8: Always ADDR_EMPTY — no NodePool for resource scopes
+    addr nodepool_base;  // 8: Always ADDR_EMPTY — no NodePool for resource scopes
 
     // Frame support: cursor save/restore only — no chunk nodes, no B-tree
     uint16_t current_frame_idx;   // Unused (NODE_NULL)
     uint16_t current_chunk_idx;   // Unused (NODE_NULL)
     uint16_t frame_counter;       // Monotonic frame ID (incremented on each frame_begin)
-    bool     frame_active;        // True when a frame is open
-    uint8_t  _frame_pad;          // Alignment padding
-    scope    prev;                 // Always NULL — resource scopes never enter R7 chain
+    bool frame_active;            // True when a frame is open
+    uint8_t _frame_pad;           // Alignment padding
+    scope prev;                   // Always NULL — resource scopes never enter R7 chain
     sc_frame_state active_frame;  // Saved cursor: total_allocated = bump offset at frame_begin
-} sc_rscope;              // Total: 96 bytes — matches SCOPE_ENTRY_SIZE
+} sc_rscope;                      // Total: 96 bytes — matches SCOPE_ENTRY_SIZE
 _Static_assert(sizeof(sc_rscope) == SCOPE_ENTRY_SIZE,
                "sc_rscope must match SCOPE_ENTRY_SIZE — update the define");
 #endif
