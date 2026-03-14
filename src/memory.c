@@ -79,12 +79,15 @@ static usize frame_depth_of_impl(scope s);
 // Arena operations (v0.2.3 - explicit scope)
 static scope arena_find_impl(const char *name);
 
+// Scope promotion (FT-14)
+static object memory_promote_impl(object ptr, usize size, void *dst);
+
 // Resource scope operations (FT-12)
-static rscope  resource_acquire_impl(usize size);
-static object  resource_alloc_impl(rscope s, usize size);
-static void    resource_reset_impl(rscope s, bool zero);
-static void    resource_release_impl(rscope s);
-static frame   resource_frame_begin_impl(rscope s);
+static rscope resource_acquire_impl(usize size);
+static object resource_alloc_impl(rscope s, usize size);
+static void resource_reset_impl(rscope s, bool zero);
+static void resource_release_impl(rscope s);
+static frame resource_frame_begin_impl(rscope s);
 static integer resource_frame_end_impl(rscope s, frame f);
 
 static void *sys0 = NULL;
@@ -630,6 +633,26 @@ static void memory_dispose_for_scope(void *scope_ptr, object ptr) {
             arena_dispose_ptr(explicit_scope, ptr);
             break;
     }
+}
+// Copy ptr (size bytes) into dst, dispatching to the correct allocator for dst's policy.
+// src can be any readable pointer — a frame allocation, a bump allocation, or a stack buffer.
+// Returns the new pointer in dst, or NULL if any argument is invalid or dst is full.
+static object memory_promote_impl(object ptr, usize size, void *dst_ptr) {
+    if (ptr == NULL || size == 0 || dst_ptr == NULL) {
+        return NULL;
+    }
+    sc_scope *dst = (sc_scope *)dst_ptr;
+    object new_ptr;
+    if (dst->policy == SCOPE_POLICY_RESOURCE) {
+        new_ptr = resource_alloc_impl((rscope)dst, size);
+    } else {
+        new_ptr = memory_alloc_for_scope(dst, size);
+    }
+    if (new_ptr == NULL) {
+        return NULL;
+    }
+    memcpy(new_ptr, ptr, size);
+    return new_ptr;
 }
 // Get the current scope configuration
 sbyte memory_get_current_scope_config(int mask_type) {
@@ -1549,22 +1572,21 @@ static rscope resource_acquire_impl(usize size) {
             continue;
         }
         // Found free slot — map a private anonymous slab
-        void *slab = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void *slab = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (slab == MAP_FAILED) {
             return NULL;
         }
         rscope rs = (rscope)s;
         memset(rs, 0, sizeof(sc_rscope));
-        rs->scope_id         = (uint8_t)i;
-        rs->policy           = SCOPE_POLICY_RESOURCE;
-        rs->slab_base        = (addr)slab;
-        rs->bump_pos         = (addr)slab;
-        rs->slab_capacity    = size;
-        rs->nodepool_base    = ADDR_EMPTY;
+        rs->scope_id = (uint8_t)i;
+        rs->policy = SCOPE_POLICY_RESOURCE;
+        rs->slab_base = (addr)slab;
+        rs->bump_pos = (addr)slab;
+        rs->slab_capacity = size;
+        rs->nodepool_base = ADDR_EMPTY;
         rs->current_frame_idx = NODE_NULL;
         rs->current_chunk_idx = NODE_NULL;
-        rs->prev             = NULL;
+        rs->prev = NULL;
         return rs;
     }
     return NULL;  // No free slot available
@@ -1641,11 +1663,10 @@ static frame resource_frame_begin_impl(rscope s) {
         return NULL;
     }
     ++s->frame_counter;
-    s->active_frame.frame_id        = s->frame_counter;
+    s->active_frame.frame_id = s->frame_counter;
     s->active_frame.total_allocated = (uint32_t)(s->bump_pos - s->slab_base);
-    s->frame_active                 = true;
-    return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) |
-                               (uintptr_t)s->frame_counter);
+    s->frame_active = true;
+    return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) | (uintptr_t)s->frame_counter);
 }
 
 /**
@@ -1665,18 +1686,18 @@ static integer resource_frame_end_impl(rscope s, frame f) {
     if ((usize)sid != s->scope_id || fid != s->active_frame.frame_id) {
         return ERR;
     }
-    s->bump_pos     = s->slab_base + s->active_frame.total_allocated;
+    s->bump_pos = s->slab_base + s->active_frame.total_allocated;
     s->frame_active = false;
     return OK;
 }
 
 static const sc_resource_i resource_iface = {
-    .acquire     = resource_acquire_impl,
-    .alloc       = resource_alloc_impl,
-    .reset       = resource_reset_impl,
-    .release     = resource_release_impl,
+    .acquire = resource_acquire_impl,
+    .alloc = resource_alloc_impl,
+    .reset = resource_reset_impl,
+    .release = resource_release_impl,
     .frame_begin = resource_frame_begin_impl,
-    .frame_end   = resource_frame_end_impl,
+    .frame_end = resource_frame_end_impl,
 };
 #endif
 
@@ -1728,6 +1749,8 @@ const sc_allocator_i Allocator = {
     .Arena = arena_iface,
     // Resource scope sub-interface (FT-12)
     .Resource = resource_iface,
+    // Scope promotion (FT-14)
+    .promote = memory_promote_impl,
 };
 #endif
 

@@ -66,8 +66,8 @@ typedef struct sc_frame_marker *frame;
 // Per-scope operations (explicit scope required)
 typedef struct sc_allocator_scope_i {
     void *(*current)(void);
-    integer (*set)(void *scope_ptr);   // pushes R7 stack; returns ERR on overflow
-    void (*restore)(void);             // pops R7 stack (reverses most recent set/create)
+    integer (*set)(void *scope_ptr);  // pushes R7 stack; returns ERR on overflow
+    void (*restore)(void);            // pops R7 stack (reverses most recent set/create)
     sbyte (*config)(void *scope_ptr, int mask_type);
     object (*alloc)(void *scope_ptr, usize size);
     void (*dispose)(void *scope_ptr, object ptr);
@@ -75,35 +75,35 @@ typedef struct sc_allocator_scope_i {
 
 // Frame sub-interface: explicit scope targeting (v0.2.3)
 typedef struct sc_frame_i {
-    frame (*begin)(void);                       // begin frame on current scope (R7)
-    integer (*end)(frame f);                    // end frame on current scope (R7)
-    frame (*begin_in)(scope s);                 // begin frame on named scope, no R7 change
-    integer (*end_in)(scope s, frame f);        // end frame on named scope, no R7 change
-    usize (*depth)(void);                       // frame depth of current scope (R7)
-    usize (*depth_of)(scope s);                 // frame depth of named scope
-    usize (*allocated)(frame f);                // bytes allocated within frame
+    frame (*begin)(void);                 // begin frame on current scope (R7)
+    integer (*end)(frame f);              // end frame on current scope (R7)
+    frame (*begin_in)(scope s);           // begin frame on named scope, no R7 change
+    integer (*end_in)(scope s, frame f);  // end frame on named scope, no R7 change
+    usize (*depth)(void);                 // frame depth of current scope (R7)
+    usize (*depth_of)(scope s);           // frame depth of named scope
+    usize (*allocated)(frame f);          // bytes allocated within frame
 } sc_frame_i;
 
 // Resource sub-interface: explicit-lifetime slab scopes (FT-12)
 // Resource scopes are never set as R7. Use Resource.alloc exclusively — not Scope.alloc.
 typedef struct sc_resource_i {
-    rscope  (*acquire)(usize size);               // mmap slab, claim scope_table slot; R7 unchanged
-    object  (*alloc)(rscope s, usize size);       // bump allocate; ALIGN_UP(size, kAlign)
-    void    (*reset)(rscope s, bool zero);        // reset bump cursor; zero=true memsets slab O(n)
-    void    (*release)(rscope s);                 // munmap slab, free scope_table slot
-    frame   (*frame_begin)(rscope s);             // save bump cursor as frame marker
-    integer (*frame_end)(rscope s, frame f);      // restore bump cursor from frame marker
+    rscope (*acquire)(usize size);            // mmap slab, claim scope_table slot; R7 unchanged
+    object (*alloc)(rscope s, usize size);    // bump allocate; ALIGN_UP(size, kAlign)
+    void (*reset)(rscope s, bool zero);       // reset bump cursor; zero=true memsets slab O(n)
+    void (*release)(rscope s);                // munmap slab, free scope_table slot
+    frame (*frame_begin)(rscope s);           // save bump cursor as frame marker
+    integer (*frame_end)(rscope s, frame f);  // restore bump cursor from frame marker
 } sc_resource_i;
 
 // Arena sub-interface: lifecycle operations (v0.2.3)
 typedef struct sc_arena_i {
-    scope (*create)(const char *name, sbyte policy);   // create arena, auto-push R7
-    void (*dispose)(scope s);                          // dispose arena, auto-unwind frames, pop R7
-    scope (*find)(const char *name);                   // find existing arena by name
-    object (*alloc)(usize size);                       // alloc from current scope (must be arena)
-    void (*dispose_ptr)(scope s, object ptr);          // dispose ptr from arena
-    frame (*frame_begin)(scope s);                     // begin frame in arena (no R7 change)
-    integer (*frame_end)(scope s, frame f);            // end frame in arena (no R7 change)
+    scope (*create)(const char *name, sbyte policy);  // create arena, auto-push R7
+    void (*dispose)(scope s);                         // dispose arena, auto-unwind frames, pop R7
+    scope (*find)(const char *name);                  // find existing arena by name
+    object (*alloc)(usize size);                      // alloc from current scope (must be arena)
+    void (*dispose_ptr)(scope s, object ptr);         // dispose ptr from arena
+    frame (*frame_begin)(scope s);                    // begin frame in arena (no R7 change)
+    integer (*frame_end)(scope s, frame f);           // end frame in arena (no R7 change)
 } sc_arena_i;
 
 // Top-level allocator facade (uses current scope)
@@ -127,6 +127,8 @@ typedef struct sc_allocator_i {
     sc_frame_i Frame;
     sc_arena_i Arena;
     sc_resource_i Resource;
+    // Scope promotion (FT-14): copy ptr (size bytes) into dst; dst is any valid scope pointer
+    object (*promote)(object ptr, usize size, void *dst);
 } sc_allocator_i;
 extern const sc_allocator_i Allocator;
 #endif
