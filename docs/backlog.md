@@ -1,7 +1,7 @@
 # Sigma.Memory — Backlog
 
 **Version:** 0.2.3  
-**Last Updated:** March 9, 2026  
+**Last Updated:** March 13, 2026  
 **Maintained By:** SigmaCore Development Team
 
 This document tracks all known gaps, deferred features, and suggested improvements. Items are
@@ -86,7 +86,24 @@ resize allocations.
 
 ## Missing Features
 
-### FT-01 — Thread safety (Sigma.Tasking integration) 🔴 Critical (for multi-threaded use)
+### ~~FT-01~~ — Thread safety hooks ✅ Superseded (v0.3.0)
+
+**Resolution:** The hook-based lock/unlock callback model has been superseded by the
+**Trusted Subsystem Registration** design (see `docs/plan-v0.3.0.md`). Sigma.Tasking registers
+with Memory to receive a dedicated slab and control page. Fiber arenas are carved from that slab
+and never enter `scope_table`, eliminating the shared mutable state concern for the fibers-as-
+arenas use case. Single-instance per-thread usage remains safe as documented.
+
+The original hook model aimed to add locks around existing paths; the registration model instead
+gives Tasking its own isolated region, so no locking of shared paths is needed for fiber memory.
+Global SYS0 mutation guards (if ever needed) will be addressed in the Ring 0 implementation
+where memory initialisation is single-threaded by construction.
+
+**Closed:** March 11, 2026
+
+---
+
+### FT-01b — Thread safety (Sigma.Tasking integration) [ARCHIVE — original text]
 
 **File:** `include/memory.h:29` — "designed for single-threaded, non-concurrent use"  
 **Problem:** All allocation paths share mutable global state (registers, scope table, page
@@ -259,6 +276,76 @@ opportunistically on `dispose`, but callers cannot force a full-scope merge.
 
 **What it solves:** Allows batch applications (compilers, parsers) to compact after a heavy
 phase before starting the next, recovering contiguous free space for large allocations.
+
+---
+
+### FT-11 — Trusted Subsystem Registration (`Allocator.Trusted`) 🔴 Critical (v0.3.0)
+
+**See:** `docs/plan-v0.3.0.md` for the full design.
+
+**Problem:** Sigma.Tasking (and future SigmaCore components) need large, managed, protected
+memory regions that do not consume scope_table slots. The 16-scope ceiling is a showstopper for
+a fiber task scheduler, which may need hundreds of concurrent arenas.
+
+**What it solves:**
+- General registration API for up to 4 trusted subsystems (mapped to free R-slots R3–R6).
+- Each registrant gets an 8 KB SYS control page (pointer stored in their R-slot) and a
+  contiguous protected slab. Slabs grow on demand in `+8 MB` increments.
+- `alloc_arena` / `free_arena` let Tasking carve per-fiber arenas from the slab; Memory handles
+  free-list management and coalescing. Fiber arenas never enter `scope_table`.
+- Three growth policies: `AUTO`, `CALLBACK`, `MANUAL`.
+- Protected flag (`NODE_FLAG_PROTECTED`) on the slab's SLB0 B-tree node prevents accidental
+  disposal from application code.
+
+**Forward compatibility:** When Sigma.Memory becomes a Sigma.OS Ring 0 component, the control
+page and slab become permanent SYS0-DAT fixtures (bootstrap-time, not runtime mmap). The
+`Allocator.Trusted` API remains unchanged — only the bootstrap mechanism differs.
+
+**Scope:**
+- `include/config.h` — 6 new constants
+- `include/internal/memory.h` — `sc_trusted_growth`, `sc_trusted_header`, `sc_slab_free_node`,
+  `NODE_FLAG_PROTECTED`
+- `include/memory.h` — `sc_allocator_trusted_i`, `.Trusted` on `sc_allocator_i`
+- `src/memory.c` — trusted implementation section (~300 lines)
+- `test/unit/test_trusted_registration.c` — TSR-01..05
+- `test/unit/test_trusted_alloc.c` — TAS-01..06
+- `test/unit/test_trusted_growth.c` — TGR-01..06
+- `test/integration/test_trusted_tasking_sim.c` — TSM-01..04
+
+---
+
+### FT-12 — `SCOPE_POLICY_RESOURCE`: explicit-lifetime slab scopes 🟡 Medium
+
+**See full plan:** `docs/plan-ft12-resource-scope.md`
+
+**Problem:** There is no allocation path for large, contiguous memory (file buffers, asset blobs,
+context-scoped scratch regions) that: (a) exceeds `SYS0_PAGE_SIZE`, (b) has an explicit lifetime
+independent of R7, and (c) carries zero MTIS overhead. Direct use of `mmap` works around the
+size limit but leaves the allocation invisible to sigma.memory and subject to manual lifetime
+management. Arenas auto-push R7 on creation, imposing LIFO disposal ordering that does not match
+all usage patterns (see BUG-001).
+
+**What it solves:** A resource scope is a single `mmap`'d slab of arbitrary size, bump-allocated,
+owned by the caller, with no R7 coupling, no NodePool, no skip list, no B-tree. Lifetime is
+explicit: `acquire` at creation, `release` at disposal. Any number of resource scopes may be
+live simultaneously in any order; `release` does not affect R7 or any other scope.
+
+**Design summary:**
+- New typedef `rscope` (`struct sc_rscope *`) — layout-compatible with `scope` in the common
+  prefix; directly castable. `sizeof(sc_rscope) == 96` (matches `SCOPE_ENTRY_SIZE`).
+- New struct `sc_rscope`: `slab_base`, `bump_pos`, `slab_capacity` replace the NodePool/page
+  fields of `sc_scope`. Frame support fields are identical — frames save/restore the bump cursor.
+- New policy constant: `SCOPE_POLICY_RESOURCE = 3`
+- New sub-interface: `Allocator.Resource` — `acquire`, `alloc`, `reset(s, bool zero)`, `release`,
+  `frame_begin`, `frame_end`. `reset(s, false)` is O(1); `reset(s, true)` zeroes the slab.
+- `Scope.set` returns `ERR` for resource scopes — they never enter the R7 chain.
+- `Scope.alloc(resource_scope, ...)` returns `NULL` — callers must use `Resource.alloc`.
+- `shutdown_memory_system` walks slots 2–15 and `munmap`s any unreleased resource scopes.
+
+**Tests:** RS-01 through RS-11 in `test/unit/test_resource_scope.c` (see plan).
+
+**Effort:** Medium — new struct, new sub-interface (~6 functions), dispatch guards in 3 existing
+functions, shutdown update, 11 TDD tests.
 
 ---
 
@@ -509,6 +596,7 @@ there is demonstrated demand.
 |----|------|-------------|
 | FT-04 | Arena frame support (`Frame.begin_in` / `Frame.end_in`) | v0.2.3 |
 | AD-03 | Frame nesting depth limit (replaced with single-frame-per-scope model) | v0.2.3 |
+| FT-01 | Thread-safety hooks — superseded by Trusted Subsystem Registration (see FT-11) | v0.3.0 |
 
 ---
 
@@ -516,9 +604,9 @@ there is demonstrated demand.
 
 | Count | Priority | Items |
 |-------|----------|-------|
-| 1 | 🔴 Critical | FT-01 |
+| 1 | 🔴 Critical | FT-11 |
 | 10 | 🟠 High | BG-01, BG-02, FT-02, FT-03, FT-09, TG-01, TG-03, TG-04, TG-06, AD-05 |
 | 6 | 🟡 Medium | BG-03, BG-04, FT-05, FT-08, TG-02, TG-05 |
 | 8 | 🟢 Low | FT-06, FT-07, FT-10, AD-01, AD-02, AD-04, DG-01, DG-02 |
-| 2 | ✅ Resolved | FT-04, AD-03 |
+| 3 | ✅ Resolved | FT-04, AD-03, FT-01 (superseded → FT-11) |
 | 5 | ⏸️ Deferred | CD-01 through CD-05 |

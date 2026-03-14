@@ -270,25 +270,20 @@ void test_pagelist_find_containing_not_found(void) {
 void test_pagelist_find_for_size(void) {
     reset_nodepool();
 
-    // skiplist_find_for_size Check 2 dereferences page_base as a page_sentinel*
-    // to read bump_offset. Use a real mmap'd page so the dereference is safe.
-    void *real_page = mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // skiplist_find_for_size Check 2 uses page_node->bump_offset to determine
+    // remaining bump space. Use a real mmap'd page for a valid page_base.
+    void *real_page =
+        mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (real_page == MAP_FAILED) {
         Assert.fail("test_pagelist_find_for_size: mmap failed");
         return;
     }
 
-    // Initialise page sentinel: bump_offset just past the sentinel header,
-    // leaving most of the page as available bump space.
-    page_sentinel ps = (page_sentinel)real_page;
-    ps->next_page_off = 0;
-    ps->bump_offset   = sizeof(sc_page_sentinel);  // 32 bytes used; ~8160 free
-
     uint16_t page_idx = alloc_page_node_slot();
     page_node *node = get_page_node(page_idx);
-    node->page_base   = (addr)real_page;
+    node->page_base = (addr)real_page;
     node->block_count = 1;
+    node->bump_offset = 0;  // entire page is bump space
     skiplist_insert(test_scope, (addr)real_page, page_idx);
 
     // Find page with 64 bytes of space

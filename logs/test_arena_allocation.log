@@ -1,9 +1,9 @@
-[2] Arena: Allocation Operations :    5 : 2026-03-11  00:27:04                  
+[2] Arena: Allocation Operations :    5 : 2026-03-13  13:57:27                  
 ================================================================================
-Running: AAL-01: Basic arena allocation                         61.441 ms [PASS]
-Running: AAL-02: Multiple arena allocations                    188.028 ms [PASS]
-Running: AAL-03: Arena as current scope                         46.468 ms [PASS]
-Running: AAL-04: Scope isolation                               122.512 ms [PASS]
-Running: AAL-05: Different policies                             85.698 ms [PASS]
+Running: AAL-01: Basic arena allocation                         80.375 ms [PASS]
+Running: AAL-02: Multiple arena allocations                    140.400 ms [PASS]
+Running: AAL-03: Arena as current scope                         40.352 ms [PASS]
+Running: AAL-04: Scope isolation                               113.281 ms [PASS]
+Running: AAL-05: Different policies                             92.750 ms [PASS]
 ================================================================================
 [2]     TESTS=  5        PASS=  5        FAIL=  0        SKIP=  0

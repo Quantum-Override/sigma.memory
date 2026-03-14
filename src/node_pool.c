@@ -354,8 +354,7 @@ void nodepool_shutdown(scope scope_ptr) {
  *   - every allocated page_node's btree_root
  *   - every allocated btree_node's left_idx, right_idx, and optional chain fields
  */
-static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity,
-                                       usize new_capacity) {
+static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity, usize new_capacity) {
     if (scope_ptr == NULL || scope_ptr->nodepool_base == ADDR_EMPTY) {
         return;
     }
@@ -368,8 +367,8 @@ static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity,
     uint16_t delta = (uint16_t)(new_nodes - old_nodes);
 
 // Convenience macro: add delta to a uint16_t field if it is not the NULL sentinel
-#define REINDEX(field) \
-    do {               \
+#define REINDEX(field)                                                   \
+    do {                                                                 \
         if ((field) != NODE_NULL) (field) = (uint16_t)((field) + delta); \
     } while (0)
 
@@ -386,7 +385,7 @@ static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity,
 
     // ── All page_nodes: update btree_root ────────────────────────────────
     usize pn_base = sizeof(nodepool_header);
-    usize pn_end  = header->page_alloc_offset;
+    usize pn_end = header->page_alloc_offset;
     for (usize off = pn_base; off < pn_end; off += sizeof(page_node)) {
         page_node *pn = (page_node *)(scope_ptr->nodepool_base + off);
         REINDEX(pn->btree_root);
@@ -396,7 +395,7 @@ static void btree_reindex_after_growth(scope scope_ptr, usize old_capacity,
     // After memmove the live btree_nodes reside in [btree_alloc_offset, new_capacity).
     // Iterate by offset (24-byte stride) and patch every index field.
     usize bt_start = header->btree_alloc_offset;
-    usize bt_end   = new_capacity;
+    usize bt_end = new_capacity;
     for (usize off = bt_start; off < bt_end; off += sizeof(sc_node)) {
         sc_node *node = (sc_node *)(scope_ptr->nodepool_base + off);
         REINDEX(node->left_idx);
@@ -872,14 +871,11 @@ int skiplist_find_for_size(scope scope_ptr, usize size, uint16_t *page_idx_out) 
         }
 
         // Check 2: remaining bump space >= size
-        page_sentinel ps = (page_sentinel)current->page_base;
-        if (ps != NULL) {
-            addr page_end  = current->page_base + SYS0_PAGE_SIZE;
-            addr bump_ptr  = current->page_base + ps->bump_offset;
-            if (page_end > bump_ptr && (page_end - bump_ptr) >= size) {
-                *page_idx_out = current_idx;
-                return OK;
-            }
+        addr page_end = current->page_base + SYS0_PAGE_SIZE;
+        addr bump_ptr = current->page_base + current->bump_offset;
+        if (page_end > bump_ptr && (page_end - bump_ptr) >= size) {
+            *page_idx_out = current_idx;
+            return OK;
         }
 
         current_idx = current->forward[0];  // Next at level 0
@@ -1505,7 +1501,7 @@ static void btree_purge_recursive(scope scope_ptr, node_idx current_idx) {
         return;
     }
     // Capture children before overwriting left_idx with free-list chain
-    node_idx left  = node->left_idx;
+    node_idx left = node->left_idx;
     node_idx right = node->right_idx;
     nodepool_free_btree_node(scope_ptr, current_idx);
     btree_purge_recursive(scope_ptr, left);
@@ -1521,7 +1517,7 @@ int btree_page_purge(scope scope_ptr, uint16_t page_idx) {
         return ERR;
     }
     btree_purge_recursive(scope_ptr, page->btree_root);
-    page->btree_root  = NODE_NULL;
+    page->btree_root = NODE_NULL;
     page->block_count = 0;
     return OK;
 }

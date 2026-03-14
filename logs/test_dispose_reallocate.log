@@ -1,7 +1,7 @@
-[2] Unit: Dispose-Reallocate Bug :    3 : 2026-03-11  00:27:04                  
+[2] Unit: Dispose-Reallocate Bug :    3 : 2026-03-13  13:57:28                  
 ================================================================================
-Running: Reproduce: single dispose-reallocate                    9.338 ms [PASS]
-Running: Reproduce: multiple dispose-reallocate                  9.925 ms [PASS]
-Running: Reproduce: coalesce pattern                             2.725 ms [PASS]
+Running: Reproduce: single dispose-reallocate                   12.294 ms [PASS]
+Running: Reproduce: multiple dispose-reallocate                 12.114 ms [PASS]
+Running: Reproduce: coalesce pattern                             3.509 ms [PASS]
 ================================================================================
 [2]     TESTS=  3        PASS=  3        FAIL=  0        SKIP=  0

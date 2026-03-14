@@ -6,11 +6,14 @@
                 "${workspaceFolder}/include",
                 "${workspaceFolder}/**",
                 "/usr/local/include",
-                "/usr/include/sigma.core",
+                "/usr/local/include/sigma.core",
                 "/usr/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
+            "compilerArgs": [
+                "-std=c2x"
+            ],
             "cStandard": "c23",
             "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64"

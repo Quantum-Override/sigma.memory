@@ -141,7 +141,8 @@ void test_jk_03_dispose_arena_auto_unwinds_frames(void) {
     // Allocate inside the frame so dispose has real cleanup to do
     object p1 = Allocator.alloc(256);
     object p2 = Allocator.alloc(512);
-    (void)p1; (void)p2;
+    (void)p1;
+    (void)p2;
 
     // Dispose arena with active frame - must auto-unwind
     Allocator.Arena.dispose(arena);
@@ -260,32 +261,30 @@ void test_jk_dbg_01_btree_tracks_slb0_alloc(void) {
     // ── the skip list must know which page owns this pointer ──────────────
     uint16_t page_idx = PAGE_NODE_NULL;
     int skip_rc = skiplist_find_containing(slb0, (addr)ptr, &page_idx);
-    Assert.isTrue(skip_rc == OK,
-        "DBG-01: skiplist_find_containing must succeed (rc=%d)", skip_rc);
+    Assert.isTrue(skip_rc == OK, "DBG-01: skiplist_find_containing must succeed (rc=%d)", skip_rc);
 
     // ── the page's B-tree must have a node for this exact address ─────────
     node_idx nidx = NODE_NULL;
     int btree_rc = btree_page_search(slb0, page_idx, (addr)ptr, &nidx);
     Assert.isTrue(btree_rc == OK,
-        "DBG-01: btree_page_search must find allocation on page %u (rc=%d)",
-        page_idx, btree_rc);
+                  "DBG-01: btree_page_search must find allocation on page %u (rc=%d)", page_idx,
+                  btree_rc);
 
     // ── page sentinel must reflect the live allocation ────────────────────
     page_node *pn = nodepool_get_page_node(slb0, page_idx);
     Assert.isNotNull(pn, "DBG-01: page_node must exist");
-    page_sentinel ps = (page_sentinel)pn->page_base;
-    Assert.isTrue(ps->alloc_count >= 1,
-        "DBG-01: page sentinel alloc_count must be >= 1 (got %u)", ps->alloc_count);
+    Assert.isTrue(pn->alloc_count >= 1, "DBG-01: page alloc_count must be >= 1 (got %u)",
+                  pn->alloc_count);
 
-    printf("  DBG-01: page_idx=%u alloc_count=%u B-tree node=%u ptr=%p\n",
-           page_idx, ps->alloc_count, nidx, ptr);
+    printf("  DBG-01: page_idx=%u alloc_count=%u B-tree node=%u ptr=%p\n", page_idx,
+           pn->alloc_count, nidx, ptr);
 
     // ── dispose must decrement alloc_count ───────────────────────────────
-    uint16_t ac_before = ps->alloc_count;
+    uint16_t ac_before = pn->alloc_count;
     Allocator.dispose(ptr);
-    Assert.isTrue(ps->alloc_count < ac_before,
-        "DBG-01: alloc_count must decrease after dispose (%u → %u)",
-        ac_before, ps->alloc_count);
+    Assert.isTrue(pn->alloc_count < ac_before,
+                  "DBG-01: alloc_count must decrease after dispose (%u → %u)", ac_before,
+                  pn->alloc_count);
 }
 
 // ============================================================================
@@ -315,40 +314,36 @@ void test_jk_dbg_02_dynamic_page_btree_and_release(void) {
             ptrs[n] = NULL;  // don't double-free via cleanup loop
         }
         n++;
-        if (dyn_ptr != NULL)
-            break;
+        if (dyn_ptr != NULL) break;
     }
 
-    Assert.isNotNull(dyn_ptr,
-        "DBG-02: page_count must increase within %d allocs (remained %zu)",
-        MAX, slb0->page_count);
+    Assert.isNotNull(dyn_ptr, "DBG-02: page_count must increase within %d allocs (remained %zu)",
+                     MAX, slb0->page_count);
 
-    printf("  DBG-02: dynamic alloc at n=%d  page_count=%zu  dyn_ptr=%p\n",
-           n - 1, slb0->page_count, dyn_ptr);
+    printf("  DBG-02: dynamic alloc at n=%d  page_count=%zu  dyn_ptr=%p\n", n - 1, slb0->page_count,
+           dyn_ptr);
 
     // ── the skip list must find the dynamic page ──────────────────────────
     uint16_t page_idx = PAGE_NODE_NULL;
     int skip_rc = skiplist_find_containing(slb0, (addr)dyn_ptr, &page_idx);
-    Assert.isTrue(skip_rc == OK,
-        "DBG-02: skiplist must find dynamic page for dyn_ptr (rc=%d)", skip_rc);
+    Assert.isTrue(skip_rc == OK, "DBG-02: skiplist must find dynamic page for dyn_ptr (rc=%d)",
+                  skip_rc);
 
     // ── the B-tree must have an entry for dyn_ptr ─────────────────────────
     node_idx nidx = NODE_NULL;
     int btree_rc = btree_page_search(slb0, page_idx, (addr)dyn_ptr, &nidx);
-    Assert.isTrue(btree_rc == OK,
-        "DBG-02: B-tree must track dyn_ptr on page %u (rc=%d)", page_idx, btree_rc);
+    Assert.isTrue(btree_rc == OK, "DBG-02: B-tree must track dyn_ptr on page %u (rc=%d)", page_idx,
+                  btree_rc);
 
     page_node *pn = nodepool_get_page_node(slb0, page_idx);
     Assert.isNotNull(pn, "DBG-02: page_node must exist");
-    page_sentinel ps = (page_sentinel)pn->page_base;
 
-    printf("  DBG-02: page_idx=%u alloc_count=%u B-tree node=%u\n",
-           page_idx, ps->alloc_count, nidx);
+    printf("  DBG-02: page_idx=%u alloc_count=%u B-tree node=%u\n", page_idx, pn->alloc_count,
+           nidx);
 
     // ── free all fill allocs except dyn_ptr ───────────────────────────────
     for (int i = 0; i < n - 1; i++) {
-        if (ptrs[i])
-            Allocator.dispose(ptrs[i]);
+        if (ptrs[i]) Allocator.dispose(ptrs[i]);
     }
     free(ptrs);
 
@@ -358,12 +353,11 @@ void test_jk_dbg_02_dynamic_page_btree_and_release(void) {
     usize count_after = slb0->page_count;
 
     Assert.isTrue(count_after < count_before,
-        "DBG-02: dynamic page must release after last alloc disposed "
-        "(page_count %zu → %zu)",
-        count_before, count_after);
+                  "DBG-02: dynamic page must release after last alloc disposed "
+                  "(page_count %zu → %zu)",
+                  count_before, count_after);
 
-    printf("  DBG-02: page_count %zu → %zu (dynamic page released)\n",
-           count_before, count_after);
+    printf("  DBG-02: page_count %zu → %zu (dynamic page released)\n", count_before, count_after);
 }
 #endif  // Region: JK-DBG
 

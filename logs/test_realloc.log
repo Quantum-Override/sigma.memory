@@ -1,12 +1,12 @@
-[2] Unit: Realloc API         :    8 : 2026-03-11  00:27:05                     
+[2] Unit: Realloc API         :    8 : 2026-03-13  13:57:28                     
 ================================================================================
-Running: REA-01: NULL ptr → alloc                              6.543 ms [PASS]
-Running: REA-02: NULL ptr + zero size → NULL                   2.779 ms [PASS]
-Running: REA-03: Non-NULL ptr + zero size → dispose            2.605 ms [PASS]
-Running: REA-04: Shrink in-place, data preserved                 7.308 ms [PASS]
-Running: REA-05: Grow, data copied to new block                  7.573 ms [PASS]
-Running: REA-06: Grow → shrink cycle, data intact              9.110 ms [PASS]
-Running: REA-07: Remainder below split threshold                 5.215 ms [PASS]
-Running: REA-08: Independent realloc chains no interference     64.887 ms [PASS]
+Running: REA-01: NULL ptr → alloc                              6.096 ms [PASS]
+Running: REA-02: NULL ptr + zero size → NULL                   2.686 ms [PASS]
+Running: REA-03: Non-NULL ptr + zero size → dispose            2.539 ms [PASS]
+Running: REA-04: Shrink in-place, data preserved                 7.336 ms [PASS]
+Running: REA-05: Grow, data copied to new block                  7.763 ms [PASS]
+Running: REA-06: Grow → shrink cycle, data intact              9.384 ms [PASS]
+Running: REA-07: Remainder below split threshold                 4.563 ms [PASS]
+Running: REA-08: Independent realloc chains no interference     43.816 ms [PASS]
 ================================================================================
 [2]     TESTS=  8        PASS=  8        FAIL=  0        SKIP=  0

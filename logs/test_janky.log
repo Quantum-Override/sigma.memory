@@ -1,11 +1,11 @@
-[2] Janky: Mixed-Scope Usage  :    7 : 2026-03-11  00:27:05                     
+[2] Janky: Mixed-Scope Usage  :    7 : 2026-03-13  13:57:28                     
 ================================================================================
-Running: JK-DBG-01: B-tree tracks a single SLB0 alloc           17.109 ms [PASS]
-Running: JK-DBG-02: B-tree tracks first dynamic-page alloc; dispose releases page2640.683 ms [PASS]
-Running: JK-01: frame in SLB0 while arena current               38.724 ms [PASS]
-Running: JK-02: alloc() routes to current scope                 22.583 ms [PASS]
-Running: JK-03: Arena.dispose auto-unwinds frames               20.620 ms [PASS]
-Running: JK-04: end_in with invalid handle returns ERR          17.946 ms [PASS]
-Running: JK-05: non-frame allocs survive frame end               5.588 ms [PASS]
+Running: JK-DBG-01: B-tree tracks a single SLB0 alloc           14.325 ms [PASS]
+Running: JK-DBG-02: B-tree tracks first dynamic-page alloc; dispose releases page2601.393 ms [PASS]
+Running: JK-01: frame in SLB0 while arena current               18.834 ms [PASS]
+Running: JK-02: alloc() routes to current scope                 56.507 ms [PASS]
+Running: JK-03: Arena.dispose auto-unwinds frames               17.050 ms [PASS]
+Running: JK-04: end_in with invalid handle returns ERR          15.248 ms [PASS]
+Running: JK-05: non-frame allocs survive frame end               6.673 ms [PASS]
 ================================================================================
 [2]     TESTS=  7        PASS=  7        FAIL=  0        SKIP=  0

@@ -46,7 +46,7 @@
 
 // ─── compile-time sizing constants ────────────────────────────────────────
 // Per-page capacity with ALLOC_BLOCK_SIZE:
-//   usable = SYS0_PAGE_SIZE - sizeof(sc_page_sentinel) = 8192 - 32 = 8160
+//   usable = SYS0_PAGE_SIZE = 8192 (no per-page sentinel overhead)
 //   blocks = floor(8160 / 256) = 31
 #define SLB0_INITIAL_PAGES 16u
 #define ALLOC_BLOCK_SIZE 256u

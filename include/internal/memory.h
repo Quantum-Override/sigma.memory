@@ -168,18 +168,20 @@ typedef struct nodepool_header {
     usize page_count;          // 8: Number of pages in skip list
     usize page_alloc_offset;   // 8: Next free page_node slot (grows up from header)
     usize btree_alloc_offset;  // 8: Next free btree_node slot (grows down from top)
-    uint16_t skip_list_head;    // 2: Index of first page_node in skip list
-    uint16_t btree_free_head;   // 2: Head of recycled btree_node free list (NODE_NULL = empty)
-    uint16_t _reserved[6];      // 12: Reserved for future use
-} nodepool_header;              // Total: 40 bytes
+    uint16_t skip_list_head;   // 2: Index of first page_node in skip list
+    uint16_t btree_free_head;  // 2: Head of recycled btree_node free list (NODE_NULL = empty)
+    uint16_t _reserved[6];     // 12: Reserved for future use
+} nodepool_header;             // Total: 40 bytes
 
-// Page directory node (20 bytes) - Skip list entry for page tracking
+// Page directory node (24 bytes) - Skip list entry for page tracking
 typedef struct page_node {
     addr page_base;                         // 8: Base address of 8KB page
     uint16_t forward[SKIP_LIST_MAX_LEVEL];  // 8: Skip list forward pointers (4 levels)
     uint16_t btree_root;                    // 2: Root of this page's B-tree (NODE_NULL if empty)
-    uint16_t block_count;                   // 2: Number of blocks allocated in this page
-} page_node;                                // Total: 20 bytes
+    uint16_t block_count;                   // 2: Number of B-tree entries (alloc + free nodes)
+    uint16_t bump_offset;                   // 2: Bump pointer offset from page_base
+    uint16_t alloc_count;                   // 2: Live allocation count (0 = page reclaimable)
+} page_node;                                // Total: 24 bytes
 
 #define PAGE_NODE_NULL ((uint16_t)0)  // Null page_node index
 
@@ -208,30 +210,8 @@ typedef struct sc_blk_footer *block_footer;
 #endif
 
 #if 1  // Region: Scope & Page Definitions
-// Minimum allocation size (must hold sc_free_block on free)
+// Minimum allocation size (must be >= 16 to hold coalescing metadata in B-tree)
 #define SLB0_MIN_ALLOC 16
-
-// Free block node (stored in-place in freed memory)
-typedef struct sc_free_block {
-    addr next_free_off;  // Address of next free block (0 = end of list)
-    usize size;          // Size of this free block
-} sc_free_block;         // size 16 bytes
-typedef struct sc_free_block *free_block;
-
-// Page sentinel (metadata at start of each SLB page)
-// DEPRECATED (Phase 7): Will be removed in favor of page_node in NodePool
-// Currently used by Phase 6 code paths, to be eliminated by Task 7-8
-typedef struct sc_page_sentinel {
-    addr next_page_off;   // Offset to next page in chain (0 = last page)
-    addr bump_offset;     // Current bump pointer within this page
-    usize scope_id;       // Owning scope ID
-    sbyte flags;          // Page-level flags (reserved)
-    sbyte page_index;     // Position in scope's page chain (0 = first)
-    sbyte _pad[6];        // Alignment to 32 bytes
-    addr free_list_head;  // Address of first free block (0 = none)
-    usize alloc_count;    // Number of live allocations on this page
-} sc_page_sentinel;       // size 32 bytes
-typedef struct sc_page_sentinel *page_sentinel;
 
 // Forward declaration for scope pointer
 typedef struct sc_scope *scope;
@@ -263,11 +243,11 @@ typedef struct sc_scope {
     uint16_t current_frame_idx;   // Head chunk node index (NODE_NULL when no frame active)
     uint16_t current_chunk_idx;   // Current bump chunk (may differ from head after chaining)
     uint16_t frame_counter;       // Monotonic frame ID generator (never reset)
-    bool     frame_active;        // True when a frame is open on this scope
-    uint8_t  _frame_pad;          // Alignment padding
-    scope    prev;                // Previous scope in activation chain (NULL = root)
+    bool frame_active;            // True when a frame is open on this scope
+    uint8_t _frame_pad;           // Alignment padding
+    scope prev;                   // Previous scope in activation chain (NULL = root)
     sc_frame_state active_frame;  // Current frame state (valid only when frame_active)
-} sc_scope;  // Total: 96 bytes (verified by _Static_assert below)
+} sc_scope;                       // Total: 96 bytes (verified by _Static_assert below)
 _Static_assert(sizeof(sc_scope) == SCOPE_ENTRY_SIZE,
                "SCOPE_ENTRY_SIZE must equal sizeof(sc_scope) — update the define");
 #endif

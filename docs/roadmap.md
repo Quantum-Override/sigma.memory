@@ -1,8 +1,36 @@
 # Sigma.Memory - Roadmap
 
 **Current Version:** 0.2.3  
-**Last Updated:** March 9, 2026  
+**Last Updated:** March 11, 2026  
 **Branch:** main
+
+---
+
+## v0.3.0 — Trusted Subsystem Registration 🎯 PLANNED
+
+**Status:** 🎯 Design complete — see `docs/plan-v0.3.0.md`  
+**Theme:** Ring 0 Infrastructure — Sigma.Tasking Integration  
+**Strategic Significance:** Establishes Memory as the foundational Ring 0 component of
+Sigma.OS, with Sigma.Tasking as the first Ring 1 trusted registrant.
+
+**Key Features:**
+- `Allocator.Trusted.register_sys(name, size, policy)` — privileged subsystem registration;
+  returns 8 KB SYS control page; stores pointer in next free R-slot (R3–R6)
+- `Allocator.Trusted.alloc_arena(sys_page, size)` — carve per-fiber arenas from subsystem slab;
+  fiber arenas never enter `scope_table` (16-scope ceiling bypassed entirely)
+- `Allocator.Trusted.free_arena(sys_page, arena, size)` — return arena to slab free-pool;
+  Memory handles coalescing
+- `Allocator.Trusted.grow(sys_page)` — manual slab growth (`+TRUSTED_SLAB_GROW_INCREMENT`)
+- `NODE_FLAG_PROTECTED` — slab allocations immune to `Allocator.dispose()` from user code
+- Three growth policies: `TRUSTED_GROWTH_AUTO`, `TRUSTED_GROWTH_CALLBACK`,
+  `TRUSTED_GROWTH_MANUAL`
+- General pattern: up to 4 trusted registrants (R3–R6); Sigma.Tasking is the first
+
+**Test Plan:** 4 test suites — TSR-01..05 (registration), TAS-01..06 (alloc/free),
+TGR-01..06 (growth policies), TSM-01..04 (Tasking simulation, valgrind clean)
+
+**Forward Compatibility:** Control page layout and API are compatible with the future Ring 0
+SYS0-DAT static fixture model. No API breaks on migration to OS-level bootstrap.
 
 ---
 
