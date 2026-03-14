@@ -47,6 +47,7 @@ enum {
     SCOPE_POLICY_RECLAIMING = 0,  // Special: SYS0 only (reclaiming allocator)
     SCOPE_POLICY_DYNAMIC = 1,     // Auto-grows by chaining pages
     SCOPE_POLICY_FIXED = 2,       // Prealloc only, returns NULL when full
+    SCOPE_POLICY_RESOURCE = 3,    // Single mmap slab, bump-only, no MTIS, no R7 coupling
 };
 // Scope flags
 enum {
@@ -57,6 +58,7 @@ enum {
 
 // Forward declarations
 typedef struct sc_scope *scope;
+typedef struct sc_rscope *rscope;
 typedef struct sc_frame_marker *frame;
 #endif
 
@@ -81,6 +83,17 @@ typedef struct sc_frame_i {
     usize (*depth_of)(scope s);                 // frame depth of named scope
     usize (*allocated)(frame f);                // bytes allocated within frame
 } sc_frame_i;
+
+// Resource sub-interface: explicit-lifetime slab scopes (FT-12)
+// Resource scopes are never set as R7. Use Resource.alloc exclusively — not Scope.alloc.
+typedef struct sc_resource_i {
+    rscope  (*acquire)(usize size);               // mmap slab, claim scope_table slot; R7 unchanged
+    object  (*alloc)(rscope s, usize size);       // bump allocate; ALIGN_UP(size, kAlign)
+    void    (*reset)(rscope s, bool zero);        // reset bump cursor; zero=true memsets slab O(n)
+    void    (*release)(rscope s);                 // munmap slab, free scope_table slot
+    frame   (*frame_begin)(rscope s);             // save bump cursor as frame marker
+    integer (*frame_end)(rscope s, frame f);      // restore bump cursor from frame marker
+} sc_resource_i;
 
 // Arena sub-interface: lifecycle operations (v0.2.3)
 typedef struct sc_arena_i {
@@ -113,6 +126,7 @@ typedef struct sc_allocator_i {
     // Sub-interfaces (v0.2.3)
     sc_frame_i Frame;
     sc_arena_i Arena;
+    sc_resource_i Resource;
 } sc_allocator_i;
 extern const sc_allocator_i Allocator;
 #endif

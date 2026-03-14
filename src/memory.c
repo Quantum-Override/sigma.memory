@@ -79,6 +79,14 @@ static usize frame_depth_of_impl(scope s);
 // Arena operations (v0.2.3 - explicit scope)
 static scope arena_find_impl(const char *name);
 
+// Resource scope operations (FT-12)
+static rscope  resource_acquire_impl(usize size);
+static object  resource_alloc_impl(rscope s, usize size);
+static void    resource_reset_impl(rscope s, bool zero);
+static void    resource_release_impl(rscope s);
+static frame   resource_frame_begin_impl(rscope s);
+static integer resource_frame_end_impl(rscope s, frame f);
+
 static void *sys0 = NULL;
 static sbyte sys_page[SYS0_PAGE_SIZE] __attribute__((aligned(SYS0_PAGE_SIZE)));
 // Scope table lives in SYS0 data area after header block
@@ -517,6 +525,9 @@ integer memory_set_current_scope(void *scope_ptr) {
         return ERR;
     }
     scope s = (scope)scope_ptr;
+    if (s->policy == SCOPE_POLICY_RESOURCE) {
+        return ERR;  // Resource scopes never enter the R7 activation chain
+    }
     if (s->prev != NULL) {
         return ERR;  // s already active in chain (prev is set by create or a prior set)
     }
@@ -589,7 +600,11 @@ static object memory_alloc_for_scope(void *scope_ptr, usize size) {
             ptr = slb0_alloc(size);
             break;
         default:  // User arenas (2-15)
-            ptr = arena_alloc(explicit_scope, size);
+            if (explicit_scope->policy == SCOPE_POLICY_RESOURCE) {
+                ptr = NULL;  // Must use Resource.alloc, not Scope.alloc
+            } else {
+                ptr = arena_alloc(explicit_scope, size);
+            }
             break;
     }
 
@@ -1388,7 +1403,7 @@ static scope arena_create_impl(const char *name, sbyte policy) {
     // Find free slot in scope_table[2-15]
     for (usize i = 2; i < 16; i++) {
         scope s = get_scope_table_entry(i);
-        if (s == NULL || s->nodepool_base == ADDR_EMPTY) {
+        if (s == NULL || (s->scope_id == 0 && s->nodepool_base == ADDR_EMPTY)) {
             // Found free slot
             if (s == NULL) {
                 // Slot not allocated, allocate from SYS0
@@ -1514,6 +1529,157 @@ static scope arena_find_impl(const char *name) {
 }
 #endif
 
+#if 1  // Region: Resource Scope Operations (FT-12)
+/**
+ * Acquire a new resource scope backed by a private anonymous mmap slab.
+ * The scope claims a free slot in scope_table[2-15], sets policy to
+ * SCOPE_POLICY_RESOURCE, and never touches R7. Caller owns the slab until
+ * resource_release_impl unmaps it.
+ *
+ * @param size  Requested slab size in bytes (must be > 0)
+ * @return rscope pointer, or NULL on failure (no free slot, mmap failed)
+ */
+static rscope resource_acquire_impl(usize size) {
+    if (size == 0) {
+        return NULL;
+    }
+    for (usize i = 2; i < 16; i++) {
+        scope s = get_scope_table_entry(i);
+        if (s == NULL || s->scope_id != 0) {
+            continue;
+        }
+        // Found free slot — map a private anonymous slab
+        void *slab = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (slab == MAP_FAILED) {
+            return NULL;
+        }
+        rscope rs = (rscope)s;
+        memset(rs, 0, sizeof(sc_rscope));
+        rs->scope_id         = (uint8_t)i;
+        rs->policy           = SCOPE_POLICY_RESOURCE;
+        rs->slab_base        = (addr)slab;
+        rs->bump_pos         = (addr)slab;
+        rs->slab_capacity    = size;
+        rs->nodepool_base    = ADDR_EMPTY;
+        rs->current_frame_idx = NODE_NULL;
+        rs->current_chunk_idx = NODE_NULL;
+        rs->prev             = NULL;
+        return rs;
+    }
+    return NULL;  // No free slot available
+}
+
+/**
+ * Bump-allocate from a resource scope's slab.
+ * Size is rounded up to the next kAlign boundary. Returns NULL if the slab
+ * is exhausted (does not grow — use reset or acquire a larger scope).
+ *
+ * @param s     Target resource scope
+ * @param size  Requested byte count
+ * @return Pointer to allocated region, or NULL on exhaustion
+ */
+static object resource_alloc_impl(rscope s, usize size) {
+    if (s == NULL || size == 0) {
+        return NULL;
+    }
+    usize aligned = (size + (kAlign - 1)) & ~(kAlign - 1);
+    if ((usize)(s->bump_pos - s->slab_base) + aligned > s->slab_capacity) {
+        return NULL;
+    }
+    object ptr = (object)s->bump_pos;
+    s->bump_pos += aligned;
+    return ptr;
+}
+
+/**
+ * Reset the resource scope bump cursor to slab_base.
+ * With zero=false this is O(1); with zero=true the entire slab is memset to 0
+ * before the cursor is reset.
+ *
+ * @param s     Target resource scope
+ * @param zero  If true, zero the slab contents before resetting the cursor
+ */
+static void resource_reset_impl(rscope s, bool zero) {
+    if (s == NULL) {
+        return;
+    }
+    if (zero) {
+        memset((void *)s->slab_base, 0, s->slab_capacity);
+    }
+    s->bump_pos = s->slab_base;
+}
+
+/**
+ * Release a resource scope: unmap its slab and zero the scope-table slot,
+ * making the slot available for future acquire calls.
+ *
+ * @param s  Resource scope to release
+ */
+static void resource_release_impl(rscope s) {
+    if (s == NULL) {
+        return;
+    }
+    if (s->slab_base != ADDR_EMPTY) {
+        munmap((void *)s->slab_base, s->slab_capacity);
+    }
+    memset(s, 0, sizeof(sc_rscope));
+    // Slot is now free: scope_id == 0
+}
+
+/**
+ * Begin a lightweight frame on a resource scope.
+ * Saves the current bump cursor into active_frame.total_allocated.
+ * Only one frame may be active at a time per scope.
+ *
+ * @param s  Target resource scope
+ * @return Packed frame handle ((scope_id << 16) | frame_counter), or NULL
+ *         if a frame is already active
+ */
+static frame resource_frame_begin_impl(rscope s) {
+    if (s == NULL || s->frame_active) {
+        return NULL;
+    }
+    ++s->frame_counter;
+    s->active_frame.frame_id        = s->frame_counter;
+    s->active_frame.total_allocated = (uint32_t)(s->bump_pos - s->slab_base);
+    s->frame_active                 = true;
+    return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) |
+                               (uintptr_t)s->frame_counter);
+}
+
+/**
+ * End a frame on a resource scope, restoring the bump cursor to the saved
+ * value. Validates the handle before applying the restore.
+ *
+ * @param s  Target resource scope
+ * @param f  Frame handle returned by resource_frame_begin_impl
+ * @return OK on success, ERR if handle is invalid or no frame is active
+ */
+static integer resource_frame_end_impl(rscope s, frame f) {
+    if (s == NULL || !s->frame_active) {
+        return ERR;
+    }
+    uint16_t sid = (uint16_t)((uintptr_t)f >> 16);
+    uint16_t fid = (uint16_t)((uintptr_t)f & 0xFFFF);
+    if ((usize)sid != s->scope_id || fid != s->active_frame.frame_id) {
+        return ERR;
+    }
+    s->bump_pos     = s->slab_base + s->active_frame.total_allocated;
+    s->frame_active = false;
+    return OK;
+}
+
+static const sc_resource_i resource_iface = {
+    .acquire     = resource_acquire_impl,
+    .alloc       = resource_alloc_impl,
+    .reset       = resource_reset_impl,
+    .release     = resource_release_impl,
+    .frame_begin = resource_frame_begin_impl,
+    .frame_end   = resource_frame_end_impl,
+};
+#endif
+
 #if 1  // Region: Allocator Interface
 // Static sub-interface instances (v0.2.3)
 static const sc_frame_i frame_iface = {
@@ -1560,6 +1726,8 @@ const sc_allocator_i Allocator = {
     // Sub-interfaces (v0.2.3)
     .Frame = frame_iface,
     .Arena = arena_iface,
+    // Resource scope sub-interface (FT-12)
+    .Resource = resource_iface,
 };
 #endif
 
@@ -1777,6 +1945,17 @@ __attribute__((destructor(101))) void shutdown_memory_system(void) {
         slb0->current_page_off = 0;
         slb0->page_count = 0;
         SlabManager.set_slab_entry(1, ADDR_EMPTY);
+    }
+    // Release any unreleased resource scope slabs (FT-12)
+    for (usize i = 2; i < 16; i++) {
+        scope s = get_scope_table_entry(i);
+        if (s != NULL && s->policy == SCOPE_POLICY_RESOURCE) {
+            rscope rs = (rscope)s;
+            if (rs->slab_base != ADDR_EMPTY) {
+                munmap((void *)rs->slab_base, rs->slab_capacity);
+            }
+            memset(s, 0, sizeof(sc_rscope));
+        }
     }
     // SYS0 is static - no cleanup needed
     sys0 = NULL;

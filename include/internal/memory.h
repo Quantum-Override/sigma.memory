@@ -250,6 +250,35 @@ typedef struct sc_scope {
 } sc_scope;                       // Total: 96 bytes (verified by _Static_assert below)
 _Static_assert(sizeof(sc_scope) == SCOPE_ENTRY_SIZE,
                "SCOPE_ENTRY_SIZE must equal sizeof(sc_scope) — update the define");
+
+// Resource scope entry — layout-compatible with sc_scope in common prefix (scope_id, policy,
+// flags, _pad). Cast safely between sc_scope* and sc_rscope* after checking policy field.
+// nodepool_base is always ADDR_EMPTY; prev is always NULL (never enters R7 chain).
+typedef struct sc_rscope *rscope;
+typedef struct sc_rscope {
+    usize scope_id;       // 8: Unique ID (matches index in scope_table)
+    sbyte policy;         // 1: Always SCOPE_POLICY_RESOURCE (immutable)
+    sbyte flags;          // 1: SCOPE_FLAG_* bitmask (mutable)
+    sbyte _pad[6];        // 6: Alignment padding — matches sc_scope offset exactly
+
+    addr  slab_base;      // 8: Base address of mmap'd slab
+    addr  bump_pos;       // 8: Current allocation pointer (advances on each alloc)
+    usize slab_capacity;  // 8: Total slab size in bytes (fixed at acquire)
+    char  name[16];       // 16: Inline scope name (null-terminated)
+
+    addr  nodepool_base;  // 8: Always ADDR_EMPTY — no NodePool for resource scopes
+
+    // Frame support: cursor save/restore only — no chunk nodes, no B-tree
+    uint16_t current_frame_idx;   // Unused (NODE_NULL)
+    uint16_t current_chunk_idx;   // Unused (NODE_NULL)
+    uint16_t frame_counter;       // Monotonic frame ID (incremented on each frame_begin)
+    bool     frame_active;        // True when a frame is open
+    uint8_t  _frame_pad;          // Alignment padding
+    scope    prev;                 // Always NULL — resource scopes never enter R7 chain
+    sc_frame_state active_frame;  // Saved cursor: total_allocated = bump offset at frame_begin
+} sc_rscope;              // Total: 96 bytes — matches SCOPE_ENTRY_SIZE
+_Static_assert(sizeof(sc_rscope) == SCOPE_ENTRY_SIZE,
+               "sc_rscope must match SCOPE_ENTRY_SIZE — update the define");
 #endif
 
 #if 1  // Region: Internal Memory Interface
