@@ -398,12 +398,14 @@ static void slb0_dispose(object ptr) {
     }
 
     // Release dynamically-allocated empty pages back to the OS.
-    // Guard: only pages beyond the initial 16-page reservation (contiguous mmap)
-    // can be individually munmap'd.  The initial block is released wholesale on
-    // shutdown via shutdown_memory_system().
+    // Guard: page indices 1–16 are the initial contiguous reservation (released wholesale on
+    // shutdown via shutdown_memory_system()); index > 16 means individually mmap'd dynamic page.
+    // NOTE: address-range comparison (page_base >= initial_end) was used historically but is
+    // fragile — under Valgrind/non-standard mmap layouts the dynamic page can land at an address
+    // inside the initial range. Index-based check is correct because nodepool_alloc_page_node
+    // allocates sequentially from index 1 with no reuse, so initial pages always occupy 1..16.
     if (pn->alloc_count == 0) {
-        addr initial_end = slb0->first_page_off + (16u * SYS0_PAGE_SIZE);
-        if (pn->page_base >= initial_end) {
+        if (page_idx > 16) {
             // Purge B-tree nodes — returns them to the nodepool free list
             btree_page_purge(slb0, page_idx);
 
