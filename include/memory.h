@@ -104,6 +104,8 @@ typedef struct sc_arena_i {
     void (*dispose_ptr)(scope s, object ptr);         // dispose ptr from arena
     frame (*frame_begin)(scope s);                    // begin frame in arena (no R7 change)
     integer (*frame_end)(scope s, frame f);           // end frame in arena (no R7 change)
+    // FT-16: pure bump slab arena (no NodePool, no MTIS)
+    scope (*create_fixed)(const char *name, usize capacity);  // mmap contiguous slab, push R7
 } sc_arena_i;
 
 // Top-level allocator facade (uses current scope)

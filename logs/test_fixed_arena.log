@@ -1,0 +1,13 @@
+[2] Arena: SCOPE_POLICY_FIXED bump arena (FT-16) :    9 : 2026-03-14  19:25:14  
+================================================================================
+Running: FA-01: create_fixed + basic alloc                   11404.953 ms [PASS]
+Running: FA-02: capacity enforced — NULL past slab end      1431.273 ms [PASS]
+Running: FA-03: bump contiguity — adjacent allocs            724.041 ms [PASS]
+Running: FA-04: 16-byte alignment invariant                    841.114 ms [PASS]
+Running: FA-05: no NodePool allocated                          522.270 ms [PASS]
+Running: FA-06: multi-page slab (3 × 8 KB)                    965.085 ms [PASS]
+Running: FA-07: cursor-save frame (bump rewind)               1879.533 ms [PASS]
+Running: FA-08: dispose restores R7 and clears slot           1121.143 ms [PASS]
+Running: FA-09: NULL / zero-capacity guards                    931.305 ms [PASS]
+================================================================================
+[2]     TESTS=  9        PASS=  9        FAIL=  0        SKIP=  0

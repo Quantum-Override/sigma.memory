@@ -282,13 +282,13 @@ typedef struct sc_scope {
     usize scope_id;             //  8: Index in scope_table (0=SYS0, 1=SLB0, 2-15=user arenas)
     sbyte policy;               //  1: SCOPE_POLICY_* (immutable after creation)
     sbyte flags;                //  1: SCOPE_FLAG_* bitmask (mutable)
-    uint16_t current_page_idx;  //  2: Cached NodePool index of current page (PAGE_NODE_NULL=none)
-    sbyte _pad[4];              //  4: Alignment padding
-    addr first_page_off;        //  8: Base address of first page in chain
-    addr current_page_off;      //  8: Base address of current (active) page
-    usize page_count;           //  8: Total pages in chain
+    uint16_t current_page_idx;  //  2: DYNAMIC: cached NodePool index of current page (v0.2.4)
+    uint32_t slab_bump;         //  4: FIXED: bump offset into slab (0 for all other policies) (v0.2.5)
+    addr first_page_off;        //  8: DYNAMIC: base address of first page; FIXED: slab base
+    addr current_page_off;      //  8: DYNAMIC: base address of current page; FIXED: slab end sentinel
+    usize page_count;           //  8: DYNAMIC: total pages in chain; FIXED: mmap page count
     char name[16];              // 16: Inline scope name (null-terminated, max 15 chars)
-    addr nodepool_base;         //  8: Base address of per-scope NodePool mmap
+    addr nodepool_base;         //  8: Base address of per-scope NodePool mmap (ADDR_EMPTY for FIXED)
 
     // Frame support (v0.2.3: single active frame per scope)
     uint16_t current_frame_idx; //  2: Head chunk node index (NODE_NULL when no frame active)
@@ -1092,8 +1092,10 @@ Allocator.Scope.alloc(scope, size)   // Allocate from explicit scope
 Allocator.Scope.dispose(scope, ptr)  // Dispose to explicit scope
 
 // Arena operations (v0.2.2+)
-Allocator.create_arena(name, policy)   // Create user arena (scope_id 2-15)
-Allocator.dispose_arena(scope)         // Dispose entire arena + all pages
+Allocator.create_arena(name, policy)         // Create user arena (scope_id 2-15)
+Allocator.dispose_arena(scope)               // Dispose entire arena + all pages
+// Pure bump arena (v0.2.5 / FT-16)
+Allocator.Arena.create_fixed(name, capacity) // Create FIXED arena: contiguous slab, O(1) bump, no NodePool
 ```
 
 ### 6.2 Memory Interface (Internal)
@@ -1148,10 +1150,11 @@ enum {
 |--------|-------|-------------|
 | `SCOPE_POLICY_RECLAIMING` | 0 | SYS0 only; first-fit with block reuse |
 | `SCOPE_POLICY_DYNAMIC` | 1 | Auto-grows by chaining pages and NodePool |
-| `SCOPE_POLICY_FIXED` | 2 | Pre-allocated; NULL when exhausted |
+| `SCOPE_POLICY_FIXED` | 2 | Pure bump allocator: single contiguous mmap slab, O(1) alloc, NULL when full (no growth, no NodePool) — create via `Arena.create_fixed(name, capacity)` (v0.2.5) |
 
 **Notes:**
 - v0.2.2+: DYNAMIC applies to SLB0 and user arenas
+- v0.2.5: FIXED uses `slab_bump` offset and `current_page_off` as end sentinel
 - NodePool growth: 8KB → 16KB → 32KB (doubles via mremap)
 - Page allocation: 8KB per page via mmap
 

@@ -4,6 +4,26 @@ All notable changes to Sigma.Memory are documented here. Full release notes for 
 
 ---
 
+## [0.2.5] - 2026-03-14
+
+**Pure Bump Arena + Dynamic Page Release Fix**
+
+- Added `Arena.create_fixed(name, capacity)` (FT-16): `SCOPE_POLICY_FIXED` now implements
+  a true pure bump allocator — contiguous mmap slab, no NodePool, no MTIS, O(1) alloc,
+  returns NULL when full (no growth). Capacity is enforced exactly (not page-rounded).
+- `sc_scope.slab_bump` (`uint32_t` at offset 12, replaces `_pad[4]`): inline bump cursor
+  for FIXED arenas; zero/unused for all other policies. Struct stays 96 bytes.
+- `sc_scope.current_page_off` reused as end-of-slab sentinel for FIXED arenas
+  (`first_page_off + capacity`), ensuring exact capacity enforcement independent of
+  `SYS0_PAGE_SIZE`.
+- Frame support on FIXED arenas: cursor-save/restore only (same semantics as `sc_rscope`).
+  `active_frame.total_allocated` saves `slab_bump`; `frame_end` restores it.
+- Fixed `slb0_dispose` dynamic page release guard (JK-DBG-02): replaced fragile
+  address-range comparison (`page_base >= initial_end`) with index-based check
+  (`page_idx > 16`). Fixes Valgrind failure under synthetic mmap addresses.
+- Test coverage: FA-01–FA-09 (fixed arena), all 9 passing, Valgrind clean.
+  All 21 unit test suites passing.
+
 ## [0.2.4] - 2026-03-14
 
 **Resource Scopes + Scope Promotion + Arena Hot-Path Optimization**

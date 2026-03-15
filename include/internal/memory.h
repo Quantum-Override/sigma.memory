@@ -233,15 +233,16 @@ typedef struct sc_scope {
     sbyte policy;               // 1: SCOPE_POLICY_* (immutable after creation)
     sbyte flags;                // 1: SCOPE_FLAG_* bitmask (mutable)
     uint16_t current_page_idx;  // 2: Cached NodePool index of current page (PAGE_NODE_NULL = none)
-    sbyte _pad[4];              // 4: Alignment padding
+    uint32_t slab_bump;         // 4: Bump offset for SCOPE_POLICY_FIXED arenas (0 for all others)
     addr first_page_off;        // 8: Offset to first page's sentinel
     addr current_page_off;      // 8: Offset to current (last active) page base address
-    usize page_count;       // 8: Number of pages in chain
-    char name[16];          // 16: Inline scope name (null-terminated)
-    addr nodepool_base;     // 8: Base address of per-scope NodePool mmap
+    usize page_count;           // 8: Number of pages in chain
+    char name[16];              // 16: Inline scope name (null-terminated)
+    addr nodepool_base;         // 8: Base address of per-scope NodePool mmap
 
     // Frame support (v0.2.3: single active frame per scope; prev-chain replaces R7 stack)
-    // Note: current_page_idx (offset 10) enables O(1) arena bump allocation (v0.2.4)
+    // Note: current_page_idx (offset 10) enables O(1) arena bump (v0.2.4)
+    // Note: slab_bump (offset 12) used by SCOPE_POLICY_FIXED for inline cursor (v0.2.5/FT-16)
     uint16_t current_frame_idx;   // Head chunk node index (NODE_NULL when no frame active)
     uint16_t current_chunk_idx;   // Current bump chunk (may differ from head after chaining)
     uint16_t frame_counter;       // Monotonic frame ID generator (never reset)

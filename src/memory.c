@@ -62,6 +62,7 @@ static int register_large_alloc_with_frame(scope scope_ptr, addr alloc_addr, usi
 static scope arena_create_impl(const char *name, sbyte policy);
 static void arena_dispose_impl(scope s);
 static object arena_alloc(scope arena, usize size);
+static scope arena_create_fixed_impl(const char *name, usize capacity);
 static void arena_dispose_ptr(scope arena, object ptr);
 
 // Scope prev-chain operations (v0.2.3)
@@ -1195,6 +1196,15 @@ static frame frame_begin_in_impl(scope s) {
         return NULL;
     }
 
+    // FIXED arenas: cursor-save frame (no NodePool/B-tree involved)
+    if (s->policy == SCOPE_POLICY_FIXED) {
+        ++s->frame_counter;
+        s->active_frame.frame_id   = s->frame_counter;
+        s->active_frame.total_allocated = s->slab_bump;  // save cursor
+        s->frame_active = true;
+        return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) | (uintptr_t)s->frame_counter);
+    }
+
     // Find 4KB free block using skip list + B-tree
     uint16_t chunk_idx = NODE_NULL;
     uint16_t page_idx = PAGE_NODE_NULL;
@@ -1273,6 +1283,15 @@ static integer frame_end_in_impl(scope s, frame f) {
     // Validate that this frame belongs to the specified scope
     if (!scope_owns_frame(s, f)) {
         return ERR;
+    }
+
+    // FIXED arenas: cursor-restore frame (no B-tree, no chunk chain)
+    if (s->policy == SCOPE_POLICY_FIXED) {
+        s->slab_bump = (uint32_t)s->active_frame.total_allocated;  // restore cursor
+        s->frame_active = false;
+        s->current_frame_idx = NODE_NULL;
+        s->current_chunk_idx = NODE_NULL;
+        return OK;
     }
 
     // Step 1: Free large allocations
@@ -1357,6 +1376,17 @@ static object arena_alloc(scope arena, usize size) {
 
     // Align size to 16-byte boundary
     usize aligned_size = (size + (kAlign - 1)) & ~(kAlign - 1);
+
+    // Fast path: pure bump allocator for FIXED arenas (no NodePool, no MTIS)
+    // current_page_off stores the exact end-of-slab address (first_page_off + capacity).
+    if (arena->policy == SCOPE_POLICY_FIXED) {
+        if (arena->first_page_off + arena->slab_bump + aligned_size > arena->current_page_off) {
+            return NULL;  // Slab full — FIXED arenas never grow
+        }
+        object ptr = (object)(arena->first_page_off + arena->slab_bump);
+        arena->slab_bump += (uint32_t)aligned_size;
+        return ptr;
+    }
 
     // If in frame context and fits in chunk, use chunk-based frame allocation
     if (arena->frame_active && aligned_size <= FRAME_CHUNK_SIZE) {
@@ -1493,6 +1523,20 @@ static void arena_dispose_impl(scope s) {
     uint8_t id = s->scope_id;
     if (id < 2 || id > 15) {
         return;  // Cannot dispose SYS0/SLB0 or invalid scope
+    }
+
+    // FIXED arenas: single mmap slab, no NodePool — fast dispose path
+    if (s->policy == SCOPE_POLICY_FIXED) {
+        if ((scope)registers_get(REG_CURRENT_SCOPE) == s) {
+            scope restore_to = s->prev ? s->prev : get_scope_table_entry(1);
+            registers_set(REG_CURRENT_SCOPE, (addr)restore_to);
+        }
+        if (s->first_page_off != 0) {
+            munmap((void *)s->first_page_off, s->page_count * SYS0_PAGE_SIZE);
+        }
+        memset(s, 0, sizeof(sc_scope));
+        s->nodepool_base = ADDR_EMPTY;
+        return;
     }
 
     // Auto-unwind active frame if present (v0.2.3: single frame per scope)
@@ -1714,6 +1758,73 @@ static const sc_frame_i frame_iface = {
     .allocated = frame_allocated_impl,
 };
 
+/**
+ * Create a pure-bump fixed-capacity arena backed by a single contiguous mmap.
+ * No NodePool or MTIS is initialised. The arena enters R7 (auto-push) and
+ * never grows past capacity — alloc returns NULL when the slab is full.
+ * Frame support is cursor-save/restore only (same semantics as sc_rscope).
+ *
+ * @param name     Scope name (truncated to 15 chars)
+ * @param capacity Requested slab size in bytes (rounded up to 8 KB pages)
+ * @return scope pointer, or NULL on slot exhaustion or mmap failure
+ */
+static scope arena_create_fixed_impl(const char *name, usize capacity) {
+    if (capacity == 0) {
+        return NULL;
+    }
+
+    // Round up to page boundary
+    usize pages = (capacity + SYS0_PAGE_SIZE - 1) / SYS0_PAGE_SIZE;
+    usize slab_size = pages * SYS0_PAGE_SIZE;
+
+    // Find free slot in scope_table[2-15]
+    scope result = NULL;
+    for (usize i = 2; i < 16; i++) {
+        scope s = get_scope_table_entry(i);
+        if (s != NULL && !(s->scope_id == 0 && s->nodepool_base == ADDR_EMPTY)) {
+            continue;  // Slot occupied
+        }
+
+        if (s == NULL) {
+            s = (scope)sys0_alloc(sizeof(sc_scope));
+            if (s == NULL) goto exit;
+            scope_table[i] = *s;
+            s = &scope_table[i];
+        }
+
+        // mmap the contiguous slab
+        void *slab = mmap(NULL, slab_size, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (slab == MAP_FAILED) goto exit;
+
+        // Initialize scope entry
+        memset(s, 0, sizeof(sc_scope));
+        s->scope_id       = (uint8_t)i;
+        s->policy         = SCOPE_POLICY_FIXED;
+        s->flags          = 0;
+        s->first_page_off = (addr)slab;
+        s->current_page_off = (addr)slab + capacity;  // Exact end sentinel (not page-rounded)
+        s->page_count     = pages;
+        s->slab_bump      = 0;
+        s->nodepool_base  = ADDR_EMPTY;  // No MTIS
+
+        if (name != NULL) {
+            strncpy(s->name, name, 15);
+            s->name[15] = '\0';
+        }
+
+        // Auto-push R7 (same as dynamic arena)
+        s->prev = (scope)registers_get(REG_CURRENT_SCOPE);
+        registers_set(REG_CURRENT_SCOPE, (addr)s);
+
+        result = s;
+        goto exit;
+    }
+
+exit:
+    return result;
+}
+
 static const sc_arena_i arena_iface = {
     .create = arena_create_impl,
     .dispose = arena_dispose_impl,
@@ -1722,6 +1833,7 @@ static const sc_arena_i arena_iface = {
     .dispose_ptr = arena_dispose_ptr,
     .frame_begin = frame_begin_in_impl,
     .frame_end = frame_end_in_impl,
+    .create_fixed = arena_create_fixed_impl,  // FT-16
 };
 
 const sc_allocator_i Allocator = {
