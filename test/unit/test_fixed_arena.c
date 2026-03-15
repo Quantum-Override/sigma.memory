@@ -41,8 +41,7 @@ static void set_teardown(void) {
 void test_fa_01_create_and_alloc(void) {
     scope fixed = Allocator.Arena.create_fixed("fa01", 4096);
     Assert.isNotNull(fixed, "FA-01: create_fixed must return non-NULL");
-    Assert.isTrue(fixed->policy == SCOPE_POLICY_FIXED,
-                  "FA-01: policy must be SCOPE_POLICY_FIXED");
+    Assert.isTrue(fixed->policy == SCOPE_POLICY_FIXED, "FA-01: policy must be SCOPE_POLICY_FIXED");
     Assert.isTrue(Allocator.Scope.current() == fixed,
                   "FA-01: R7 must point to fixed arena after create");
 
@@ -112,8 +111,8 @@ void test_fa_04_alignment(void) {
         object p = Allocator.Scope.alloc(fixed, sz);
         // Stop if slab full (test doesn't need every size to fit)
         if (p == NULL) break;
-        Assert.isTrue(((uintptr_t)p & 0xF) == 0,
-                      "FA-04: alloc(size=%zu) must be 16-byte aligned", sz);
+        Assert.isTrue(((uintptr_t)p & 0xF) == 0, "FA-04: alloc(size=%zu) must be 16-byte aligned",
+                      sz);
     }
     Allocator.Arena.dispose(fixed);
 }
@@ -155,8 +154,8 @@ void test_fa_06_multi_page(void) {
         alloc_count++;
     }
     // 3 pages × 8192 / 256 = 96 allocs (rounded down after alignment)
-    Assert.isTrue(alloc_count >= 90,
-                  "FA-06: must serve many allocs across 3 pages (got %zu)", alloc_count);
+    Assert.isTrue(alloc_count >= 90, "FA-06: must serve many allocs across 3 pages (got %zu)",
+                  alloc_count);
     Allocator.Arena.dispose(fixed);
 }
 
@@ -184,16 +183,14 @@ void test_fa_07_frame_cursor_save(void) {
     Assert.isNotNull(in2, "FA-07: in-frame alloc 2 must succeed");
 
     // Cursor must have advanced
-    Assert.isTrue(fixed->slab_bump > 64,
-                  "FA-07: slab_bump must have advanced during frame");
+    Assert.isTrue(fixed->slab_bump > 64, "FA-07: slab_bump must have advanced during frame");
 
     integer rc = Allocator.Arena.frame_end(fixed, f);
     Assert.isTrue(rc == OK, "FA-07: frame_end must succeed");
 
     // Cursor restored: next alloc lands at same address as in1
     object after = Allocator.Scope.alloc(fixed, 128);
-    Assert.isTrue(after == in1,
-                  "FA-07: alloc after frame_end must reuse reclaimed region");
+    Assert.isTrue(after == in1, "FA-07: alloc after frame_end must reuse reclaimed region");
     (void)pre;
     Allocator.Arena.dispose(fixed);
 }
@@ -224,8 +221,7 @@ void test_fa_08_dispose(void) {
 
     // Slot must be cleared (scope_id == 0 and nodepool_base == ADDR_EMPTY)
     scope recycled = Memory.get_scope(slot_id);
-    Assert.isTrue(recycled->scope_id == 0,
-                  "FA-08: scope_table slot must be cleared after dispose");
+    Assert.isTrue(recycled->scope_id == 0, "FA-08: scope_table slot must be cleared after dispose");
 }
 
 #endif

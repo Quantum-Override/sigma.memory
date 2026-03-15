@@ -1199,7 +1199,7 @@ static frame frame_begin_in_impl(scope s) {
     // FIXED arenas: cursor-save frame (no NodePool/B-tree involved)
     if (s->policy == SCOPE_POLICY_FIXED) {
         ++s->frame_counter;
-        s->active_frame.frame_id   = s->frame_counter;
+        s->active_frame.frame_id = s->frame_counter;
         s->active_frame.total_allocated = s->slab_bump;  // save cursor
         s->frame_active = true;
         return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) | (uintptr_t)s->frame_counter);
@@ -1793,20 +1793,20 @@ static scope arena_create_fixed_impl(const char *name, usize capacity) {
         }
 
         // mmap the contiguous slab
-        void *slab = mmap(NULL, slab_size, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void *slab =
+            mmap(NULL, slab_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (slab == MAP_FAILED) goto exit;
 
         // Initialize scope entry
         memset(s, 0, sizeof(sc_scope));
-        s->scope_id       = (uint8_t)i;
-        s->policy         = SCOPE_POLICY_FIXED;
-        s->flags          = 0;
+        s->scope_id = (uint8_t)i;
+        s->policy = SCOPE_POLICY_FIXED;
+        s->flags = 0;
         s->first_page_off = (addr)slab;
         s->current_page_off = (addr)slab + capacity;  // Exact end sentinel (not page-rounded)
-        s->page_count     = pages;
-        s->slab_bump      = 0;
-        s->nodepool_base  = ADDR_EMPTY;  // No MTIS
+        s->page_count = pages;
+        s->slab_bump = 0;
+        s->nodepool_base = ADDR_EMPTY;  // No MTIS
 
         if (name != NULL) {
             strncpy(s->name, name, 15);
