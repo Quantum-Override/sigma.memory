@@ -1,33 +1,47 @@
 # Sigma.Memory - Roadmap
 
-**Current Version:** 0.2.3  
-**Last Updated:** March 11, 2026  
+**Current Version:** 0.3.0 (in development — Controller Model rewrite)  
+**Last Updated:** March 16, 2026  
 **Branch:** main
 
 ---
 
-## v0.3.0 — Trusted Subsystem Registration 🎯 PLANNED
+## v0.3.0 — Controller Model 🔨 IN PROGRESS
 
-**Status:** 🎯 Design complete — see `docs/plan-v0.3.0.md`  
-**Theme:** Ring 0 Infrastructure — Sigma.Tasking Integration  
-**Strategic Significance:** Establishes Memory as the foundational Ring 0 component of
-Sigma.OS, with Sigma.Tasking as the first Ring 1 trusted registrant.
+**Status:** 🔨 Ground-up rewrite — Design complete → see [`docs/design.md`](design.md)  
+**Theme:** Deterministic allocation via typed controllers — simplicity over abstraction  
+**Strategic Significance:** Fixes three structural problems in v0.2.x; relocates `sc_allocator_i`
+to `sigma.core`; makes sigma.text genuinely independent of sigma.memory at link time.
+
+> **Note:** The previously planned v0.3.0 "Trusted Subsystem Registration" design (Sigma.Tasking
+> fiber arena integration) is deferred. That design is archived in
+> [`../sigma.mem_0.2/docs/plan-v0.3.0.md`](../../sigma.mem_0.2/docs/plan-v0.3.0.md).
+> The Controller Model resolves the foundational problems that needed to be fixed first; Tasking
+> integration will be re-evaluated once 0.3.0 is stable.
 
 **Key Features:**
-- `Allocator.Trusted.register_sys(name, size, policy)` — privileged subsystem registration;
-  returns 8 KB SYS control page; stores pointer in next free R-slot (R3–R6)
-- `Allocator.Trusted.alloc_arena(sys_page, size)` — carve per-fiber arenas from subsystem slab;
-  fiber arenas never enter `scope_table` (16-scope ceiling bypassed entirely)
-- `Allocator.Trusted.free_arena(sys_page, arena, size)` — return arena to slab free-pool;
-  Memory handles coalescing
-- `Allocator.Trusted.grow(sys_page)` — manual slab growth (`+TRUSTED_SLAB_GROW_INCREMENT`)
-- `NODE_FLAG_PROTECTED` — slab allocations immune to `Allocator.dispose()` from user code
-- Three growth policies: `TRUSTED_GROWTH_AUTO`, `TRUSTED_GROWTH_CALLBACK`,
-  `TRUSTED_GROWTH_MANUAL`
-- General pattern: up to 4 trusted registrants (R3–R6); Sigma.Tasking is the first
+- `slab` type: raw mmap-backed region, no embedded policy
+- `bump_allocator` (`sc_bump_ctrl_s *`): cursor bump, `reset`, frame snapshot stack (depth 16),
+  no individual free — O(1) alloc, O(1) reset
+- `reclaim_allocator` (`sc_reclaim_ctrl_s *`): MTIS-backed (skip-list PageList + B-tree NodePool),
+  individual `free`, frame sequence-tag sweep — `Allocator.alloc/free/realloc` facade dispatches here
+- Controller structs allocated from **SLB0** — no separate bump pool; SLB0 handles reuse on release
+- Controller registry: `sc_ctrl_registry_s` embedded in SYS0 (≤ 257 bytes); tracks up to
+  `SC_MAX_CONTROLLERS` (32) controller pointers
+- R7 permanently fixed to SLB0 — scope stack, `Scope.set/restore` removed
+- `sc_allocator_i` definition moves to `sigma.core` — decouples sigma.text from sigma.memory
+- Removed: `Allocator.Scope`, `Allocator.Arena`, `Allocator.Resource`, `Allocator.promote`,
+  frame depth globals, `sc_resource_i`, `sc_arena_i`, `sc_allocator_scope_i`
+- Retained: `Allocator.alloc / free / realloc` top-level facade (dispatches to SLB0 reclaim ctrl)
 
-**Test Plan:** 4 test suites — TSR-01..05 (registration), TAS-01..06 (alloc/free),
-TGR-01..06 (growth policies), TSM-01..04 (Tasking simulation, valgrind clean)
+**Test Plan (TDD — 6 phases):**  
+Phase 0: sigma.core interface relocation + sigma.text bool-arg fix  
+Phase 1: `slab` type — acquire/release, basic mmap round-trip  
+Phase 2: `bump_allocator` — alloc, reset, frame_begin/frame_end, overflow  
+Phase 3: `reclaim_allocator` — alloc, free, realloc, frame sequence-tag  
+Phase 4: Registry — create_bump/create_reclaim, SLB0 ctrl alloc, shutdown walk  
+Phase 5: Public API — Allocator facade, drop-in compat, Valgrind clean  
+Phase 6: sigma.text integration — clean build, REQUIRES=("sigma.core") only
 
 **Forward Compatibility:** Control page layout and API are compatible with the future Ring 0
 SYS0-DAT static fixture model. No API breaks on migration to OS-level bootstrap.

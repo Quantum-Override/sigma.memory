@@ -1,7 +1,14 @@
 # Sigma.Memory — Backlog
 
-**Version:** 0.2.3  
-**Last Updated:** March 13, 2026  
+> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
+> Items below are from the v0.2.x backlog. After 0.3.0 initial implementation:
+> - Review each item — many are superseded by the Controller Model redesign
+>   (BG-01 `sbyte` warning, BG-02 `RECLAIMING` silent degradation, BG-03 `FIXED` enforcement)
+> - Carry forward any still-applicable items with updated context
+> - Add new 0.3.0 backlog items discovered during implementation
+
+**Version:** 0.2.3 → 0.3.0 rewrite in progress  
+**Last Updated:** March 13, 2026 (v0.2.x items); update after 0.3.0 lands  
 **Maintained By:** SigmaCore Development Team
 
 This document tracks all known gaps, deferred features, and suggested improvements. Items are

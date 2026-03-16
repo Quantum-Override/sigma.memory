@@ -1,8 +1,15 @@
 # Sigma.Memory - Architecture & Reference Guide
 
-**Version:** 0.2.3  
+> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
+> This document reflects the v0.2.x API (`Allocator.Scope`, `Allocator.Arena`, `Allocator.Resource`, etc.).  
+> After the 0.3.0 rewrite, replace with the Controller Model API:  
+> `Allocator.acquire/release`, `bump_allocator`, `reclaim_allocator`, per-controller `alloc/reset/free/frame_begin/frame_end`.  
+> The SYS0/SLB0 internal layout section remains largely valid except: R7 is fixed, scope stack removed,  
+> `sc_ctrl_registry_s` replaces `scope_table` for controller tracking.
+
+**Version:** 0.2.3 → (archived; 0.3.0 API in [`design.md`](design.md))  
 **Date:** March 8, 2026  
-**Status:** Beta Release (User Arenas + Dynamic NodePool Growth)
+**Status:** Archived — v0.2.x reference only
 
 ---
 

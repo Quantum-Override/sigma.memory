@@ -1,10 +1,17 @@
 # Sigma.Memory - Design Evolution
 
+> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
+> Chapters 1–10 below document the v0.2.x journey (January–March 2026).  
+> After the 0.3.0 Controller Model rewrite is complete, add **Chapter 11: The Controller Model Pivot** covering:
+> the R7 disposal bug, why scope-as-mutable-global was fragile, the decision to fix R7 to SLB0,
+> separate vtable structs per policy, and SLB0 as the registry allocator.  
+> Reference: [`docs/design.md`](design.md) for the full 0.3.0 specification.
+
 **A Living Chronicle of Architectural Discovery**
 
 **Authors:** SigmaCore Development Team  
 **Journey Began:** January 2026  
-**Current Milestone:** v0.2.4-nodepool-stability (March 11, 2026)  
+**Current Milestone:** v0.2.5 → v0.3.0 Controller Model (March 2026)  
 **Philosophy:** "Good enough to ship" is the enemy of innovation
 
 ---

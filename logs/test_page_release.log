@@ -1,9 +1,0 @@
-[2] Unit: SLB0 Dynamic Page Release :    5 : 2026-03-13  13:57:28               
-================================================================================
-Running: PRL-01: SLB0 starts with 16 pages                       5.514 ms [PASS]
-Running: PRL-02: Overflow creates dynamic page                3669.764 ms [PASS]
-Running: PRL-03: Dynamic page released when empty             3167.458 ms [PASS]
-Running: PRL-04: Initial pages not individually released       141.180 ms [PASS]
-Running: PRL-05: SLB0 usable after page release               2562.738 ms [PASS]
-================================================================================
-[2]     TESTS=  5        PASS=  5        FAIL=  0        SKIP=  0

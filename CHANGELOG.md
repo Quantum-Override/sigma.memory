@@ -1,79 +1,22 @@
 # Changelog
 
-All notable changes to Sigma.Memory are documented here. Full release notes for each version are in [`docs/archive/`](docs/archive/).
+All notable changes to Sigma.Memory are documented here.  
+**Previous history (v0.1.0 – v0.2.5):** see [`../sigma.mem_0.2/CHANGELOG.md`](../sigma.mem_0.2/CHANGELOG.md)
 
 ---
 
-## [0.2.5] - 2026-03-14
+## [0.3.0] - TBD
 
-**Pure Bump Arena + Dynamic Page Release Fix**
+**Controller Model Rewrite**
 
-- Added `Arena.create_fixed(name, capacity)` (FT-16): `SCOPE_POLICY_FIXED` now implements
-  a true pure bump allocator — contiguous mmap slab, no NodePool, no MTIS, O(1) alloc,
-  returns NULL when full (no growth). Capacity is enforced exactly (not page-rounded).
-- `sc_scope.slab_bump` (`uint32_t` at offset 12, replaces `_pad[4]`): inline bump cursor
-  for FIXED arenas; zero/unused for all other policies. Struct stays 96 bytes.
-- `sc_scope.current_page_off` reused as end-of-slab sentinel for FIXED arenas
-  (`first_page_off + capacity`), ensuring exact capacity enforcement independent of
-  `SYS0_PAGE_SIZE`.
-- Frame support on FIXED arenas: cursor-save/restore only (same semantics as `sc_rscope`).
-  `active_frame.total_allocated` saves `slab_bump`; `frame_end` restores it.
-- Fixed `slb0_dispose` dynamic page release guard (JK-DBG-02): replaced fragile
-  address-range comparison (`page_base >= initial_end`) with index-based check
-  (`page_idx > 16`). Fixes Valgrind failure under synthetic mmap addresses.
-- Test coverage: FA-01–FA-09 (fixed arena), all 9 passing, Valgrind clean.
-  All 21 unit test suites passing.
+Architecture fully redesigned. See [`docs/design.md`](docs/design.md) for the complete specification.
 
-## [0.2.4] - 2026-03-14
-
-**Resource Scopes + Scope Promotion + Arena Hot-Path Optimization**
-
-- Added `Allocator.Resource` sub-interface (FT-12): private mmap-backed bump scopes for
-  short-lived bulk allocations; `acquire/alloc/reset/release/frame_begin/frame_end`
-- Added `Allocator.promote(ptr, size, dst)` (FT-14): copy an allocation from any source
-  (frame, resource scope, stack buffer) into a target scope with a single call;
-  dispatches on `dst->policy` — no source type is required
-- Arena O(1) bump allocation (FT-15): `sc_scope.current_page_idx` caches the NodePool
-  page index, replacing a skip list traversal (`O(log n)`) on every arena alloc with a
-  direct `nodepool_get_page_node` call (`O(1)`)
-- Test coverage: 44 tests, 100% passing, Valgrind clean
-- New test suites: `test_scope_interface.c` (RS-01–RS-11), `test_promote.c` (PM-01–PM-09)
-
-## [0.2.3] - 2026-03-09
-
-**Realloc API + Dynamic Page Release + Skip List Correctness**
-
-- Added `Allocator.realloc(ptr, size)` — standard realloc semantics with in-place shrink
-- Dynamic SLB0 page release: overflow pages returned to OS via `munmap` when fully freed
-- Skip list correctness: fragmented pages now excluded from large allocation requests
-- Fixed critical SIGSEGV: stale pointer after `mremap(MREMAP_MAYMOVE)` in `btree_page_insert`
-- Fixed critical SIGSEGV: dangling page chain pointer after `munmap` in `slb0_dispose`
-- Test coverage: 35 tests, 100% passing, valgrind clean
-- New test suites: `test_realloc.c` (REA-01–REA-08), `test_page_release.c` (PRL-01–PRL-05), `test_skip_list_correctness.c` (SLC-01–SLC-03)
-
-## [0.2.2] - 2026-03-15
-
-**Arena System + Dynamic NodePool Growth**
-
-- Added user arena system: 14 concurrent user arenas (scope_id 2–15)
-- Arena API: `Allocator.create_arena(name, policy)`, `Allocator.dispose_arena(scope)`
-- Dynamic NodePool growth via `mremap` — no more fixed-size metadata limit
-- Replaces frame-based model (v0.2.1) with simpler O(1) bump-allocation arenas
-- Test coverage: 31 tests, 100% passing, 0 bytes leaked
-
-## [0.2.1] - 2026-03-08
-
-**Frame Support**
-
-- Frame support for SLB0: chunked bump allocators for bulk deallocation
-- 17/17 frame tests passing, valgrind clean
-
-## [0.2.0] - 2026-02-12
-
-**MTIS Foundation**
-
-- Complete architectural overhaul: pool allocator → Multi-Tiered Indexing Schema (MTIS)
-- Two-tier hierarchical indexing: Skip List (PageList) + per-page B-trees
-- O(log n) allocation and deallocation; zero malloc/free in core allocator
-- 24-byte cache-aligned B-tree nodes; dynamic NodePool starting at 2KB
-- Register machine model for minimal ABI overhead
+- `slab` type: raw mmap-backed memory region, no policy embedded
+- `bump_allocator` (`sc_bump_ctrl_s *`): pure cursor bump, O(1) alloc, `reset`, frame snapshots
+- `reclaim_allocator` (`sc_reclaim_ctrl_s *`): MTIS-backed, individual `free`, frame sequence-tag sweep
+- Controller structs allocated from SLB0 (no separate bump pool in SYS0)
+- Controller registry: `sc_ctrl_registry_s` embedded in SYS0; tracks up to `SC_MAX_CONTROLLERS` controller pointers
+- R7 fixed permanently to SLB0 — scope stack removed
+- `sc_allocator_i` interface definition moved to `sigma.core`
+- Removed: `Allocator.Scope`, `Allocator.Arena`, `Allocator.Resource`, `Allocator.promote`, frame depth globals
+- Retained: `Allocator.alloc / free / realloc` facade (dispatches to SLB0) for drop-in compat
