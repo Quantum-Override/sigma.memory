@@ -1,273 +1,143 @@
 /*
- * SigmaCore
- * Copyright (c) 2026 David Boarman (BadKraft) and contributors
- * QuantumOverride [Q|]
- * ----------------------------------------------
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * SigmaCore — sigma.memory
  * ----------------------------------------------
  * File: internal/memory.h
- * Description: SigmaCore memory management implementation
+ * Description: Private implementation constants for sigma.memory v0.3.0.
+ *              SYS0 geometry, memory-state flags, and SYS0-level diagnostic
+ *              declarations.  Not installed; never included by consumers.
  */
-
 #pragma once
 
-#include "config.h"
-// ----------------
+#include <sigma.core/allocator.h>
 #include <sigma.core/types.h>
-#include <stdint.h>  // Explicit include for uint32_t, etc.
+#include "sigma.memory/memory.h"
 
-// layout constants
-#define kAlign 16                                     // 16-byte alignment
-#define SYS0_PAGE_SIZE 8192                           // 8 KB system page size (v0.2.0)
-#define BLK_END 0xDEADC0DE                            // end of block marker
-#define SYS0_REGISTERS_OFFSET 0                       // offset of registers region
-#define SYS0_REGISTERS_SIZE (8 * sizeof(addr))        // 64 bytes (R0-R7)
-#define SYS0_SLAB_TABLE_OFFSET (SYS0_REGISTERS_SIZE)  // 64 bytes
-#define SYS0_SLAB_TABLE_SIZE 128                      // 128 bytes (SlabTable[16], 8 bytes each)
-#define SYS0_STACK_OFFSET (SYS0_SLAB_TABLE_OFFSET + SYS0_SLAB_TABLE_SIZE)  // 192
-#define SYS0_STACK_SIZE 128  // 128 bytes (generic Stack[16], 8 bytes each)
-#define SYS0_NODE_TABLE_OFFSET (SYS0_STACK_OFFSET + SYS0_STACK_SIZE)  // 320
-#define SYS0_NODE_TABLE_SIZE 30  // 30 bytes (NodeTable[15], 2 bytes each)
-#define SYS0_NODE_STACK_OFFSET (SYS0_NODE_TABLE_OFFSET + SYS0_NODE_TABLE_SIZE)  // 350
-#define SYS0_NODE_STACK_SIZE 128                 // 128 bytes (NodeStack depth + 15 slots)
-#define SYS0_RESERVED_SIZE 1536                  // 1536 bytes (478-1536 unused: 1058 bytes)
-#define FIRST_BLOCK_OFFSET (SYS0_RESERVED_SIZE)  // 1536
+// ── Alignment ──────────────────────────────────────────────────────────────
+#define kAlign 16
 
-#define LAST_FOOTER_OFFSET (SYS0_PAGE_SIZE - sizeof(sc_blk_footer))  // 8184
-// Scope table layout (in SYS0 data area, not reserved)
-#define SCOPE_TABLE_COUNT 16  // 16 scope entries
-#define SCOPE_ENTRY_SIZE 96   // Each scope entry: sizeof(sc_scope) — keep in sync
+// ── SYS0 page size ─────────────────────────────────────────────────────────
+#define SYS0_PAGE_SIZE 8192  // 8 KB static bootstrap page
 
-#if 1  // Region: Two Phase Memory Initilization
-/*
- * PHASE 1: Bootstrap (during constructor, before main())
- * -------------------------------------------------------
- * - RESERVED region (0-1535): Static geometry structures (registers, slab table, NodeTable,
- * NodeStack)
- * - DAT region (1536-8191): Bootstrap-time dynamic allocator (sys0_alloc with headers)
- *   - R7 points to scope_table[0] (SYS0 scope)
- *   - Allocator.alloc() → sys0_alloc() for permanent bootstrap objects
- *   - All allocations are PERMANENT (no dispose during bootstrap)
- *   - After init: DAT frozen, MEM_STATE_BOOTSTRAP_COMPLETE set
- *
- * PHASE 2: Runtime (after constructor completes)
- * -------------------------------------------------------
- * - R7 switches to scope_table[1] (SLB0 becomes default scope)
- * - Allocator.alloc() → slb0_alloc() for dynamic runtime allocations
- * - sys0_alloc() disabled (asserts if called post-bootstrap)
- * - All user allocations in SLB0+ pages (external to SYS0)
- *
- * WHY SYS0 SCOPE EXISTS:
- * - Bootstrap needs dynamic allocation (scope_table size, future objects)
- * - Header overhead acceptable for bootstrap (permanent, no fragmentation)
- * - After bootstrap: DAT = static data + legacy headers (wasted space OK)
- */
+// ── SYS0 byte-offset layout ────────────────────────────────────────────────
+//
+//  [  0 –  63]  Register file R0–R7                      (64 bytes)
+//  [ 64 – 191]  Reserved pad (was scope_table[16])       (128 bytes)
+//  [192 – 455]  sc_ctrl_registry_s                       (<= 264 bytes)
+//  [456 – 8191] SYS0-DAT: bootstrap first-fit allocator  (7736 bytes)
+//
+#define SYS0_REGISTERS_SIZE (8 * sizeof(addr))  // 64
+#define SYS0_RESERVED_SIZE 128
+#define SYS0_REGISTRY_SIZE 264
+
+#define SYS0_REGISTERS_OFFSET 0
+#define SYS0_RESERVED_OFFSET (SYS0_REGISTERS_OFFSET + SYS0_REGISTERS_SIZE)  // 64
+#define SYS0_REGISTRY_OFFSET (SYS0_RESERVED_OFFSET + SYS0_RESERVED_SIZE)    // 192
+#define SYS0_DAT_OFFSET (SYS0_REGISTRY_OFFSET + SYS0_REGISTRY_SIZE)         // 456
+
+// POLICY_KERNEL defined in sigma.core/allocator.h (POLICY_KERNEL = 3).
+// Redefined here as a fallback guard while the system header may lag.
+#ifndef POLICY_KERNEL
+#define POLICY_KERNEL 3
 #endif
 
-#if 1  // Region: SYS0 Reserved Structures
-// Memory state flags
-enum {
-    MEM_STATE_ALIGN_SYS0 = 1u << 0,          // sys0 page is kAlign aligned
-    MEM_STATE_ALIGN_HEADER = 1u << 1,        // header size is kAlign multiple
-    MEM_STATE_ALIGN_FOOTER = 1u << 2,        // footer placement is naturally aligned
-    MEM_STATE_BOOTSTRAP_COMPLETE = 1u << 3,  // bootstrap phase complete (DAT frozen)
-    // bits 4-5 reserved for future use
-    MEM_STATE_USER_READY = 1u << 6,  // user memory system is ready
-    MEM_STATE_READY = 1u << 7,       // memory system is ready
-};
-// Virtual registers (R0-R7) cached in SYS0
-typedef struct sc_registers {
-    addr R0;     // SYS0 base address (R0: enables relative offset resolution)
-    addr R1;     // Reserved (will cache NodePool base in v0.2.0)
-    addr R2;     // Operation result register (convention: B-Tree ops return via R2)
-    addr R3;     // Reserved
-    addr R4;     // Reserved
-    addr R5;     // Reserved
-    addr R6;     // Reserved (will cache parent scope in v0.2.0)
-    addr R7;     // Current scope pointer (R7: enables O(1) scope lookup)
-} sc_registers;  // size 64 bytes
-typedef struct sc_registers *registers;
+// ── MTIS structs (kernel controller internal metadata) ─────────────────────
+// Ported from sigma.mem_0.2 node_pool.h; scoped per-controller (no global state).
 
-#endif
+// Skip-list constants
+#define KNL_SKIP_LEVELS 4                   // 4-level skip list; handles 256+ pages
+#define KNL_NODEPOOL_SIZE 16384u            // 16 KB nodepool mmap (page_node + sc_node arrays)
+#define KNL_SLAB_SIZE (2u * 1024u * 1024u)  // 2 MB kernel arena (x86 huge-page boundary)
+#define KNL_PAGE_SIZE 4096u                 // granularity for page tracking
+#define KNL_MIN_ALLOC 16u                   // minimum allocation quantum
 
-#if 1  // Region: B-Tree Node Definitions (v0.2.0)
-// Node index type (16-bit index into NodePool)
-typedef uint16_t node_idx;
-#define NODE_NULL ((node_idx)0)  // Null node index
+// Null sentinels
+#define KNL_NODE_NULL ((uint16_t)0)
+#define KNL_PAGE_NULL ((uint16_t)0)
 
-// B-Tree node structure (24 bytes - cache-friendly, 3 nodes per cache line)
-typedef struct sc_node {
+// B-tree node — 24 bytes, cache-line friendly (3 per 64B line)
+typedef struct knl_node_s {
     addr start;          // 8: allocation start address
-    uint32_t length;     // 4: actual size in bytes (up to 4GB)
-    uint16_t left_idx;   // 2: left child index (NODE_NULL if none)
-    uint16_t right_idx;  // 2: right child index (NODE_NULL if none)
+    uint32_t length;     // 4: usable size in bytes
+    uint16_t left_idx;   // 2: left child (KNL_NODE_NULL = none)
+    uint16_t right_idx;  // 2: right child (KNL_NODE_NULL = none)
+    uint16_t info;       // 2: flags (bit9 = FREE_FLAG)
+    uint8_t _pad[6];     // 6: reserved / frame extensions
+} knl_node_s;
 
-    // Info field (2 bytes):
-    // Bits 0-7:   log2(max_free_size) - represents 2^0 to 2^255 bytes
-    // Bit 8:      direction (0=left, 1=right subtree has max)
-    // Bit 9:      FREE_FLAG - this node represents a free block
-    // Bit 10:     FRAME_NODE_FLAG - this node is a frame chunk
-    // Bits 11-15: reserved for future use
-    uint16_t info;  // 2: allocation info and flags
+#define KNL_FREE_FLAG 0x0200u  // bit 9 of info: block is free
 
-    // _reserved[6] used for frame extensions:
-    // - FRAME_NODE_FLAG: frame_data.{frame_offset, next_chunk_idx, frame_id}
-    // - FRAME_LARGE_FLAG: first 2 bytes = next_large_alloc_idx (linked list)
-    union {
-        struct {
-            uint16_t frame_offset;    // 2: current bump position in chunk (frame use)
-            uint16_t next_chunk_idx;  // 2: next chunk in chain (frame use)
-            uint16_t frame_id;        // 2: frame identifier
-        } frame_data;
-        struct {
-            uint16_t next_large_alloc;  // 2: next large allocation in frame (FRAME_LARGE_FLAG)
-            uint8_t _pad[4];            // 4: unused
-        } large_alloc_data;
-        uint8_t _reserved[6];  // 6: raw reserved space
-    };
-} sc_node;  // Total: 24 bytes - cache-line friendly (3 nodes per 64B line)
-typedef struct sc_node *btree_node;
+// Page directory entry — skip-list node tracking one arena page
+typedef struct knl_page_node_s {
+    addr page_base;                     // 8: base address of tracked page
+    uint16_t forward[KNL_SKIP_LEVELS];  // 8: skip-list forward pointers
+    uint16_t btree_root;                // 2: root of this page's B-tree
+    uint16_t block_count;               // 2: live B-tree entries
+    uint16_t bump_offset;               // 2: bump pointer within page
+    uint16_t alloc_count;               // 2: live allocation count
+} knl_page_node_s;                      // Total: 24 bytes
 
-// Bit masks for info field
-#define NODE_SIZE_MASK 0x00FF      // Bits 0-7: log2 size
-#define NODE_DIRECTION_BIT 0x0100  // Bit 8: direction
-#define NODE_FREE_FLAG 0x0200      // Bit 9: free flag
-#define FRAME_NODE_FLAG 0x0400     // Bit 10: frame chunk flag (bump allocated)
-#define FRAME_LARGE_FLAG 0x0800    // Bit 11: frame large allocation (>4KB, B-tree allocated)
-#define NODE_RESERVED_MASK 0xF000  // Bits 12-15: reserved
+// NodePool header — at the start of the 8 KB nodepool mmap
+// page_nodes grow up from offset sizeof(knl_nodepool_hdr_s).
+// knl_node_s entries grow down from the top.
+typedef struct knl_nodepool_hdr_s {
+    usize capacity;            // 8: total mmap size
+    usize page_count;          // 8: pages in skip list
+    usize page_alloc_off;      // 8: next free page_node slot (grows up)
+    usize btree_alloc_off;     // 8: next free btree_node slot (grows down)
+    uint16_t skip_head;        // 2: index of first page_node in skip list
+    uint16_t btree_free_head;  // 2: recycled btree_node free list head
+    uint16_t _reserved[6];     // 12: reserved
+} knl_nodepool_hdr_s;          // Total: 40 bytes
 
-// Skip list constants
-#define SKIP_LIST_MAX_LEVEL 4  // 4 levels (0-3) - sufficient for 256+ pages
-#define SKIP_LIST_P 0.5        // 50% probability for level promotion
+// ── sc_kernel_ctrl_s ───────────────────────────────────────────────────────
+// Baked into SYS0 DAT. Not in the registry. Never released.
+// Backing: 2 MB mmap (KNL_SLAB_SIZE). Nodepool: 8 KB separate mmap.
+// SLB0 delegates slb0_alloc/free/realloc to this controller.
+typedef struct sc_kernel_ctrl_s {
+    sc_ctrl_base_s base;           // MUST be first; policy = POLICY_KERNEL
+    usize bump;                    // next-free offset in the 2 MB arena
+    usize capacity;                // KNL_SLAB_SIZE
+    knl_nodepool_hdr_s *nodepool;  // 8 KB mmap — page_node + knl_node_s arrays
 
-// Frame constants
-#define FRAME_CHUNK_SIZE 4096  // 4KB chunks for frame allocations
-#define MAX_FRAME_DEPTH 1      // Maximum depth per scope: single active frame
+    // vtable
+    object (*alloc)(struct sc_kernel_ctrl_s *c, usize size);
+    void (*free)(struct sc_kernel_ctrl_s *c, object ptr);
+    object (*realloc)(struct sc_kernel_ctrl_s *c, object ptr, usize new_size);
+} sc_kernel_ctrl_s;
 
-// NodePool header structure (40 bytes) - Phase 7 two-tier architecture
-// Initial size: 2KB (small start, grows dynamically via mremap)
-// Growth pattern: 2KB → 4KB → 8KB → 16KB → 32KB (doubles each time)
-typedef struct nodepool_header {
-    usize capacity;            // 8: Total mmap'd size (starts at 2KB, grows dynamically)
-    usize page_count;          // 8: Number of pages in skip list
-    usize page_alloc_offset;   // 8: Next free page_node slot (grows up from header)
-    usize btree_alloc_offset;  // 8: Next free btree_node slot (grows down from top)
-    uint16_t skip_list_head;   // 2: Index of first page_node in skip list
-    uint16_t btree_free_head;  // 2: Head of recycled btree_node free list (NODE_NULL = empty)
-    uint16_t _reserved[6];     // 12: Reserved for future use
-} nodepool_header;             // Total: 40 bytes
+// ── SYS0 DAT layout ───────────────────────────────────────────────────────
+//   [DAT+0]            sc_reclaim_ctrl_s  — SLB0 (R7, POLICY_RECLAIM first-fit)
+//   [DAT+SLB0_CTRL_SZ] sc_slab_s          — SLB0 slab descriptor
+//   [DAT+SLB0_END]     sc_kernel_ctrl_s   — kernel controller (MTIS, not in registry)
+//   [DAT+KNL_CTRL_OFF+KCTRL_SZ] sc_slab_s — kernel 2 MB slab descriptor
+#define KNL_CTRL_OFF                                                                           \
+    (((usize)sizeof(struct sc_reclaim_ctrl_s) + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1)) + \
+        (((usize)sizeof(sc_slab_s) + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1))
+#define KNL_CTRL_SZ (((usize)sizeof(sc_kernel_ctrl_s) + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1))
 
-// Page directory node (24 bytes) - Skip list entry for page tracking
-typedef struct page_node {
-    addr page_base;                         // 8: Base address of 8KB page
-    uint16_t forward[SKIP_LIST_MAX_LEVEL];  // 8: Skip list forward pointers (4 levels)
-    uint16_t btree_root;                    // 2: Root of this page's B-tree (NODE_NULL if empty)
-    uint16_t block_count;                   // 2: Number of B-tree entries (alloc + free nodes)
-    uint16_t bump_offset;                   // 2: Bump pointer offset from page_base
-    uint16_t alloc_count;                   // 2: Live allocation count (0 = page reclaimable)
-} page_node;                                // Total: 24 bytes
-
-#define PAGE_NODE_NULL ((uint16_t)0)  // Null page_node index
-
-#endif
-
-#if 1  // Region: Memory Block Definitions
-// Meta-block flags
+// ── Memory state flags ─────────────────────────────────────────────────────
 enum {
-    BLK_FLAG_FREE = 1u << 0,
-    BLK_FLAG_LAST = 1u << 1,
-    BLK_FLAG_FOOT = 1u << 2,
+    MEM_STATE_SYS0_MAPPED = 1u << 0,
+    MEM_STATE_BOOTSTRAP_COMPLETE = 1u << 1,
+    MEM_STATE_SLB0_READY = 1u << 2,
+    MEM_STATE_READY = 1u << 3,
+    MEM_STATE_KERNEL_READY = 1u << 4,
 };
-// Block header/footer structures
-typedef struct sc_blk_header {
-    uint32_t next_off;  // Offset from sys_page base to next header
-    uint32_t size;      // Usable size of the payload block in bytes
-    sbyte flags;        // Bitfield: FREE, LAST, HAS_FOOTER, reserved
-    sbyte _pad[7];      // Padding for alignment
-} sc_blk_header;        // size 16 bytes
-typedef struct sc_blk_header *block_header;
-typedef struct sc_blk_footer {
-    uint32_t magic;  // #DEADC0DE marker
-    uint32_t size;   // Copy of the header.size for backward traversal
-} sc_blk_footer;     // size 8 bytes
-typedef struct sc_blk_footer *block_footer;
-#endif
 
-#if 1  // Region: Scope & Page Definitions
-// Minimum allocation size (must be >= 16 to hold coalescing metadata in B-tree)
-#define SLB0_MIN_ALLOC 16
+// ── SYS0-level diagnostics (declared here; defined in memory.c) ────────────
+addr memory_sys0_base(void);
+usize memory_sys0_size(void);
+uint8_t memory_state(void);
+addr memory_r7(void);
 
-// Forward declaration for scope pointer
-typedef struct sc_scope *scope;
+// ── Trusted subsystem grant (defined in memory.c, used by module.c) ────────────
+sc_trusted_cap_t *trusted_grant(const char *name, usize size, sc_alloc_policy policy);
 
-// Frame state structure for nesting support
-typedef struct sc_frame_state {
-    uint16_t frame_id;           // Frame identifier
-    uint16_t head_chunk_idx;     // First chunk in chain (bump allocated)
-    uint16_t large_allocs_head;  // First large allocation (>4KB, B-tree allocated)
-    uint16_t _pad;               // Alignment padding
-    uint32_t total_allocated;    // Bytes allocated in frame
-} sc_frame_state;
+// ── Module lifecycle hooks (called by src/module.c via sigma.core module system) ──
+void init_memory_system(void);
+void cleanup_memory_system(void);
 
-// Unified scope table entry (64 bytes base + frame extensions)
-// Layout: scope_table[0]=SYS0, scope_table[1]=SLB0, [2-15]=user arenas
-// The slab_table[i] array parallels scope_table[i] with page-0 addresses
-typedef struct sc_scope {
-    usize scope_id;         // 8: Unique ID (matches index in scope_table)
-    sbyte policy;           // 1: SCOPE_POLICY_* (immutable after creation)
-    sbyte flags;            // 1: SCOPE_FLAG_* bitmask (mutable)
-    sbyte _pad[6];          // 6: Alignment padding
-    addr first_page_off;    // 8: Offset to first page's sentinel
-    addr current_page_off;  // 8: Offset to current (last active) page
-    usize page_count;       // 8: Number of pages in chain
-    char name[16];          // 16: Inline scope name (null-terminated)
-    addr nodepool_base;     // 8: Base address of per-scope NodePool mmap
-
-    // Frame support (v0.2.3: single active frame per scope; prev-chain replaces R7 stack)
-    uint16_t current_frame_idx;   // Head chunk node index (NODE_NULL when no frame active)
-    uint16_t current_chunk_idx;   // Current bump chunk (may differ from head after chaining)
-    uint16_t frame_counter;       // Monotonic frame ID generator (never reset)
-    bool frame_active;            // True when a frame is open on this scope
-    uint8_t _frame_pad;           // Alignment padding
-    scope prev;                   // Previous scope in activation chain (NULL = root)
-    sc_frame_state active_frame;  // Current frame state (valid only when frame_active)
-} sc_scope;                       // Total: 96 bytes (verified by _Static_assert below)
-_Static_assert(sizeof(sc_scope) == SCOPE_ENTRY_SIZE,
-               "SCOPE_ENTRY_SIZE must equal sizeof(sc_scope) — update the define");
-#endif
-
-#if 1  // Region: Internal Memory Interface
-struct sc_slab_manager_i;
-extern const struct sc_slab_manager_i SlabManager;
-
-// Note: sys0_alloc/dispose are now private (static) methods in memory.c
-// Tests should use Allocator.alloc/dispose or Allocator.Scope methods with explicit scope instead
-typedef struct sc_memory_i {
-    usize (*sys0_size)(void);
-    sbyte (*state)(void);
-    block_header (*get_first_header)(void);
-    block_footer (*get_last_footer)(void);
-    addr (*get_sys0_base)(void);
-    const struct sc_slab_manager_i *SlabManager;
-    addr (*get_slots_base)(void);
-    addr (*get_slots_end)(void);
-    scope (*get_scope)(usize index);  // For testing: access scope table
-} sc_memory_i;
-extern const sc_memory_i Memory;
-#endif
+// ── Test utility — Trusted subsystem reset ───────────────────────────────────────
+// Unmaps trusted arenas and resets the slot counter.
+// Does NOT touch SLB0. Safe to call mid-session (sigma.test allocations remain valid).
+void memory_trusted_reset(void);

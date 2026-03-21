@@ -2,6 +2,6 @@
 /build/test
 /build
 /package
+/logs
 *.o
 *.bak
-/package

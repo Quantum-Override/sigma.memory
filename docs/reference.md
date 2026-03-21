@@ -1,8 +1,15 @@
 # Sigma.Memory - Architecture & Reference Guide
 
-**Version:** 0.2.3  
+> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
+> This document reflects the v0.2.x API (`Allocator.Scope`, `Allocator.Arena`, `Allocator.Resource`, etc.).  
+> After the 0.3.0 rewrite, replace with the Controller Model API:  
+> `Allocator.acquire/release`, `bump_allocator`, `reclaim_allocator`, per-controller `alloc/reset/free/frame_begin/frame_end`.  
+> The SYS0/SLB0 internal layout section remains largely valid except: R7 is fixed, scope stack removed,  
+> `sc_ctrl_registry_s` replaces `scope_table` for controller tracking.
+
+**Version:** 0.2.3 → (archived; 0.3.0 API in [`design.md`](design.md))  
 **Date:** March 8, 2026  
-**Status:** Beta Release (User Arenas + Dynamic NodePool Growth)
+**Status:** Archived — v0.2.x reference only
 
 ---
 
@@ -279,24 +286,26 @@ typedef struct sc_frame_state {
 } sc_frame_state;  // 12 bytes
 
 typedef struct sc_scope {
-    usize scope_id;         //  8: Index in scope_table
-    sbyte policy;           //  1: SCOPE_POLICY_*
-    sbyte flags;            //  1: SCOPE_FLAG_* bitmask
-    sbyte _pad[6];          //  6: Alignment
-    addr first_page_off;    //  8: First page address
-    addr current_page_off;  //  8: Current (active) page
-    usize page_count;       //  8: Pages in chain
-    char name[16];          // 16: Inline name
-    
-    // Frame support (v0.2.1+)
-    uint16_t current_frame_idx;  //  2: Active frame chunk
-    uint16_t current_chunk_idx;  //  2: Current chunk in frame
-    uint16_t frame_counter;      //  2: Next frame_id
-    uint16_t frame_depth;        //  2: Current nesting depth (0-16)
-    sc_frame_state frame_stack[16]; // 192: LIFO frame stack
-    
-    addr reserved[1];       //  8: Reserved (future extensions)
-} sc_scope;                 // Total: 256 bytes (expanded from 64)
+    usize scope_id;             //  8: Index in scope_table (0=SYS0, 1=SLB0, 2-15=user arenas)
+    sbyte policy;               //  1: SCOPE_POLICY_* (immutable after creation)
+    sbyte flags;                //  1: SCOPE_FLAG_* bitmask (mutable)
+    uint16_t current_page_idx;  //  2: DYNAMIC: cached NodePool index of current page (v0.2.4)
+    uint32_t slab_bump;         //  4: FIXED: bump offset into slab (0 for all other policies) (v0.2.5)
+    addr first_page_off;        //  8: DYNAMIC: base address of first page; FIXED: slab base
+    addr current_page_off;      //  8: DYNAMIC: base address of current page; FIXED: slab end sentinel
+    usize page_count;           //  8: DYNAMIC: total pages in chain; FIXED: mmap page count
+    char name[16];              // 16: Inline scope name (null-terminated, max 15 chars)
+    addr nodepool_base;         //  8: Base address of per-scope NodePool mmap (ADDR_EMPTY for FIXED)
+
+    // Frame support (v0.2.3: single active frame per scope)
+    uint16_t current_frame_idx; //  2: Head chunk node index (NODE_NULL when no frame active)
+    uint16_t current_chunk_idx; //  2: Current bump chunk (may differ from head after chaining)
+    uint16_t frame_counter;     //  2: Monotonic frame ID generator (never reset)
+    bool frame_active;          //  1: True when a frame is open on this scope
+    uint8_t _frame_pad;         //  1: Alignment padding
+    scope prev;                 //  8: Previous scope in activation chain (NULL = root)
+    sc_frame_state active_frame;//  16: Current frame state (valid only when frame_active)
+} sc_scope;                     // Total: 96 bytes
 
 // Frame constants
 #define FRAME_CHUNK_SIZE 4096  // 4KB per chunk
@@ -1090,8 +1099,10 @@ Allocator.Scope.alloc(scope, size)   // Allocate from explicit scope
 Allocator.Scope.dispose(scope, ptr)  // Dispose to explicit scope
 
 // Arena operations (v0.2.2+)
-Allocator.create_arena(name, policy)   // Create user arena (scope_id 2-15)
-Allocator.dispose_arena(scope)         // Dispose entire arena + all pages
+Allocator.create_arena(name, policy)         // Create user arena (scope_id 2-15)
+Allocator.dispose_arena(scope)               // Dispose entire arena + all pages
+// Pure bump arena (v0.2.5 / FT-16)
+Allocator.Arena.create_fixed(name, capacity) // Create FIXED arena: contiguous slab, O(1) bump, no NodePool
 ```
 
 ### 6.2 Memory Interface (Internal)
@@ -1146,10 +1157,11 @@ enum {
 |--------|-------|-------------|
 | `SCOPE_POLICY_RECLAIMING` | 0 | SYS0 only; first-fit with block reuse |
 | `SCOPE_POLICY_DYNAMIC` | 1 | Auto-grows by chaining pages and NodePool |
-| `SCOPE_POLICY_FIXED` | 2 | Pre-allocated; NULL when exhausted |
+| `SCOPE_POLICY_FIXED` | 2 | Pure bump allocator: single contiguous mmap slab, O(1) alloc, NULL when full (no growth, no NodePool) — create via `Arena.create_fixed(name, capacity)` (v0.2.5) |
 
 **Notes:**
 - v0.2.2+: DYNAMIC applies to SLB0 and user arenas
+- v0.2.5: FIXED uses `slab_bump` offset and `current_page_off` as end sentinel
 - NodePool growth: 8KB → 16KB → 32KB (doubles via mremap)
 - Page allocation: 8KB per page via mmap
 

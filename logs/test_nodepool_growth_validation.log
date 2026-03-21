@@ -1,9 +1,0 @@
-[2] NodePool: Growth Validation :    5 : 2026-03-11  00:27:05                   
-================================================================================
-Running: NPV-01: Growth preserves existing data                 79.829 ms [PASS]
-Running: NPV-02: Rapid sequential allocations                  230.211 ms [PASS]
-Running: NPV-03: Alternating allocation pattern                 57.698 ms [PASS]
-Running: NPV-04: Growth failure behavior documented              2.833 ms [PASS]
-Running: NPV-05: Large allocation stress                       335.451 ms [PASS]
-================================================================================
-[2]     TESTS=  5        PASS=  5        FAIL=  0        SKIP=  0

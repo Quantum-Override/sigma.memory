@@ -12,7 +12,8 @@
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
             "compilerArgs": [
-                "-std=c2x"
+                "-std=c2x",
+                "-Wno-attributes"
             ],
             "cStandard": "c23",
             "cppStandard": "gnu++17",

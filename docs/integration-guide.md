@@ -1,8 +1,14 @@
 # Sigma.Memory v0.2.2 - Integration Guide for Sigma.Test & Anvil
 
+> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
+> This integration guide covers the v0.2.x `Allocator.Arena` / `Allocator.Resource` API.  
+> After 0.3.0 lands, rewrite this guide around the Controller Model API.  
+> Key integration changes: sigma.text links `sigma.core` for `sc_allocator_i` (no longer `sigma.memory`);  
+> Anvil's `Allocator.Resource` usage maps to `bump_allocator` with `Allocator.acquire + create_bump`;  
+> sigma.test bootstrap uses `sigma.core.alloc` (malloc-backed reclaim controller).
+
 **Date:** March 8, 2026  
-**Status:** Dog-Food Release Planning  
-**Target Delivery:** March 29, 2026 (3 weeks)
+**Status:** Archived — v0.2.x integration guide only
 
 ---
 

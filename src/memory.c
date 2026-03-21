@@ -22,1763 +22,1516 @@
  * SOFTWARE.
  * ----------------------------------------------
  * File: memory.c
- * Description: SigmaCore memory management implementation
+ * Description: sigma.memory v0.3.0 — Phase 1.
+ *              SYS0 bootstrap, SLB0 controller, Allocator facade,
+ *              raw slab lifecycle.
  */
-
-#include "internal/memory.h"
-#include "internal/node_pool.h"
-#include "internal/slab_manager.h"
+#define _GNU_SOURCE
 #include "memory.h"
-// ----------------
-#include <stdio.h>
-#include <stdlib.h>
+#include "internal/memory.h"
+
 #include <string.h>
 #include <sys/mman.h>
 
-// Register indices
-#define REG_CURRENT_SCOPE 7
-#define REG_SYS0_BASE 0
-
-// Forward declarations
-static object sys0_alloc(usize size);
-static void sys0_dispose(object ptr);
+// ── Forward declarations — API ─────────────────────────────────────────────
+void init_memory_system(void);
+void cleanup_memory_system(void);
+static bool allocator_is_ready(void);
 static object slb0_alloc(usize size);
-static void slb0_dispose(object ptr);
+static void slb0_free(object ptr);
 static object slb0_realloc(object ptr, usize new_size);
-block_header memory_get_first_header(void);
-static object memory_alloc_for_scope(void *scope_ptr, usize size);
-static void memory_dispose_for_scope(void *scope_ptr, object ptr);
-scope get_scope_table_entry(usize index);
+static slab allocator_acquire(usize size);
+static void allocator_release(sc_ctrl_base_s *ctrl);
+static bump_allocator allocator_create_bump(usize size);
+static reclaim_allocator allocator_create_reclaim(usize size);
+static sc_ctrl_base_s *allocator_create_custom(usize size, ctrl_factory_fn factory);
+static void allocator_register_ctrl(sc_ctrl_base_s *ctrl);
 
-// Frame operations (v0.2.1)
-static frame frame_begin_impl(void);
-static integer frame_end_impl(frame f);
-static usize frame_depth_impl(void);
-static usize frame_allocated_impl(frame f);
-static object alloc_from_frame(scope scope_ptr, usize size);
-static int register_large_alloc_with_frame(scope scope_ptr, addr alloc_addr, usize alloc_size);
+// ── Forward declarations — helpers ────────────────────────────────────────
+static void bootstrap_sys0(void);
+static void bootstrap_slb0(void);
+static void bootstrap_kernel(void);
 
-// Arena operations (v0.2.2)
-static scope arena_create_impl(const char *name, sbyte policy);
-static void arena_dispose_impl(scope s);
-static object arena_alloc(scope arena, usize size);
-static void arena_dispose_ptr(scope arena, object ptr);
+// kernel controller helpers (MTIS)
+static object kernel_alloc(sc_kernel_ctrl_s *c, usize size);
+static void kernel_free(sc_kernel_ctrl_s *c, object ptr);
+static object kernel_realloc(sc_kernel_ctrl_s *c, object ptr, usize new_size);
+// nodepool helpers
+static bool knl_nodepool_grow(sc_kernel_ctrl_s *c);
+static knl_page_node_s *knl_page_alloc(sc_kernel_ctrl_s *c);
+static knl_node_s *knl_btree_alloc(sc_kernel_ctrl_s *c);
+static void knl_btree_free_node(sc_kernel_ctrl_s *c, uint16_t idx);
+static uint16_t knl_page_index(sc_kernel_ctrl_s *c, knl_page_node_s *pn);
+static knl_node_s *knl_node_at(sc_kernel_ctrl_s *c, uint16_t idx);
+static knl_page_node_s *knl_page_at(sc_kernel_ctrl_s *c, uint16_t idx);
+// skip-list helpers
+static int knl_skip_random_level(void);
+static uint16_t knl_skip_find_for_size(sc_kernel_ctrl_s *c, usize size);
+static uint16_t knl_skip_find_containing(sc_kernel_ctrl_s *c, addr address);
+static void knl_skip_insert(sc_kernel_ctrl_s *c, knl_page_node_s *pn);
+// NOTE(artifact): knl_skip_remove was written for the original SLB0 page-release path
+// (grow from 16 pages @ 4 KB, release back to min when alloc count hits 0). The kernel
+// controller moved to a single fixed 2 MB arena — pages are formatting within that
+// arena, not individually mapped. Retained as a reference if per-page release is
+// ever revisited (e.g., configurable arena size with runtime shrink).
+// static void knl_skip_remove(sc_kernel_ctrl_s *c, uint16_t pidx);
+// B-tree helpers
+static uint16_t knl_btree_insert(sc_kernel_ctrl_s *c, uint16_t pidx, addr start, usize len);
+static uint16_t knl_btree_page_search(sc_kernel_ctrl_s *c, uint16_t pidx, addr start);
+static void knl_btree_find_best_recursive(sc_kernel_ctrl_s *c, uint16_t cur, usize need,
+                                          uint16_t *best, uint32_t *best_sz);
+static uint16_t knl_btree_find_free(sc_kernel_ctrl_s *c, uint16_t pidx, usize need);
+static uint16_t knl_btree_find_min(sc_kernel_ctrl_s *c, uint16_t idx);
+static uint16_t knl_btree_find_max(sc_kernel_ctrl_s *c, uint16_t idx);
+static uint16_t knl_btree_find_predecessor(sc_kernel_ctrl_s *c, uint16_t root, uint16_t target);
+static uint16_t knl_btree_find_successor(sc_kernel_ctrl_s *c, uint16_t root, uint16_t target);
+static uint16_t knl_btree_delete_recursive(sc_kernel_ctrl_s *c, uint16_t cur, uint16_t del,
+                                           bool *deleted);
+static void knl_btree_delete(sc_kernel_ctrl_s *c, uint16_t pidx, uint16_t nidx);
+static void knl_btree_coalesce(sc_kernel_ctrl_s *c, uint16_t pidx, uint16_t nidx);
+// page lifecycle
+static uint16_t knl_ensure_page(sc_kernel_ctrl_s *c, usize need);
+static object knl_bump_from_page(sc_kernel_ctrl_s *c, uint16_t pidx, usize need);
 
-// Scope prev-chain operations (v0.2.3)
-static void scope_restore(void);
-static bool scope_owns_frame(scope s, frame f);
+// bump controller helpers
+static object bump_ctrl_alloc(struct sc_bump_ctrl_s *c, usize size);
+static void bump_ctrl_reset(struct sc_bump_ctrl_s *c, bool zero);
+static frame bump_ctrl_frame_begin(struct sc_bump_ctrl_s *c);
+static void bump_ctrl_frame_end(struct sc_bump_ctrl_s *c, frame f);
+static void bump_ctrl_shutdown(sc_ctrl_base_s *base);
 
-// Scope-generic page allocator with MTIS registration (v0.2.3)
-static page_node *scope_alloc_tracked_page(scope s);
+// reclaim controller helpers
+static object reclaim_ctrl_alloc(struct sc_reclaim_ctrl_s *c, usize size);
+static void reclaim_ctrl_free(struct sc_reclaim_ctrl_s *c, object ptr);
+static object reclaim_ctrl_realloc(struct sc_reclaim_ctrl_s *c, object ptr, usize new_size);
+static frame reclaim_ctrl_frame_begin(struct sc_reclaim_ctrl_s *c);
+static void reclaim_ctrl_frame_end(struct sc_reclaim_ctrl_s *c, frame f);
+static void reclaim_ctrl_shutdown(sc_ctrl_base_s *base);
+static object reclaim_alloc_from(struct sc_reclaim_ctrl_s *c, usize size, uint32_t seq);
+static void reclaim_free_block(struct sc_reclaim_ctrl_s *c, rc_block_hdr_s *hdr);
 
-// Frame operations (v0.2.3 - explicit scope)
-static frame frame_begin_in_impl(scope s);
-static integer frame_end_in_impl(scope s, frame f);
-static usize frame_depth_of_impl(scope s);
+// trusted subsystem helpers
+sc_trusted_cap_t *trusted_grant(const char *name, usize size, sc_alloc_policy policy);
 
-// Arena operations (v0.2.3 - explicit scope)
-static scope arena_find_impl(const char *name);
+// ── Private struct definitions ────────────────────────────────────────────
+typedef struct sc_registers_s {
+    addr R[8];  // R0–R7; R7 is fixed to SLB0 ctrl at bootstrap, never changes
+} sc_registers_s;
 
-static void *sys0 = NULL;
-static sbyte sys_page[SYS0_PAGE_SIZE] __attribute__((aligned(SYS0_PAGE_SIZE)));
-// Scope table lives in SYS0 data area after header block
-// scope_table[0]=SYS0, scope_table[1]=SLB0, [2-15]=user arenas
-static scope scope_table = NULL;
+// sc_reclaim_ctrl_s is fully defined in sigma.memory/memory.h (Phase 3).
 
-// Internal register access functions
-static addr registers_get(sbyte index) {
-    registers regs = (registers)(sys_page + SYS0_REGISTERS_OFFSET);
-    if (index < 0 || index > 7) {
-        return 0;  // Invalid index
-    }
-    // Access register array via pointer arithmetic
-    return ((addr *)regs)[index];
-}
-static void registers_set(sbyte index, addr value) {
-    registers regs = (registers)(sys_page + SYS0_REGISTERS_OFFSET);
-    if (index < 0 || index > 7) {
-        return;  // Invalid index, no-op
-    }
-    // Set register array via pointer arithmetic
-    ((addr *)regs)[index] = value;
-}
-// Get SYS0 page base address from R0
-static addr get_sys0_base(void) {
-    return registers_get(REG_SYS0_BASE);
-}
+// ── SYS0-DAT layout (from SYS0_DAT_OFFSET) ───────────────────────────────
+//   [+0]              sc_reclaim_ctrl_s  — SLB0 ctrl (R7, first-fit)
+//   [+SLB0_CTRL_SZ]   sc_slab_s          — SLB0 64 KB slab descriptor
+//   [+KNL_CTRL_OFF]   sc_kernel_ctrl_s   — kernel ctrl (MTIS, not in registry)
+//   [+KNL_CTRL_OFF
+//    +KNL_CTRL_SZ]    sc_slab_s          — kernel 2 MB slab descriptor
+//
+#define SLB0_SIZE 65536u
+#define SLB0_CTRL_SZ \
+    (((usize)sizeof(struct sc_reclaim_ctrl_s) + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1))
+#define SLB0_SLAB_SZ (((usize)sizeof(sc_slab_s) + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1))
 
-// SYS0 reclaiming allocation (first-fit with splitting)
-static object sys0_alloc(usize size) {
-    object ptr = NULL;
-    block_header hdr = memory_get_first_header();
-    if (hdr == NULL || size == 0) {
-        goto exit;
-    }
+// ── File-static state ──────────────────────────────────────────────────────
+static addr s_sys0_base = ADDR_EMPTY;
+static uint8_t s_state = 0;
+static uint8_t s_next_slab_id = 2u;  // 1 = SLB0, 2+ = user slabs
 
-    // Align size to kAlign boundary
-    usize aligned = (size + (kAlign - 1)) & ~(kAlign - 1);
+// Trusted subsystem caps (R1–R6); index = slot - 1
+static uint8_t s_next_trusted_slot = TRUSTED_SLOT_MIN;
+static sc_trusted_cap_t *s_trusted_caps[TRUSTED_SLOT_MAX];  // [0]=R1 .. [5]=R6
 
-    // Define minimum remainder to avoid tiny fragments
-    const usize MIN_REMAINDER = sizeof(sc_blk_header) + kAlign;
-
-    // First-fit search
-    while (hdr != NULL) {
-        if ((hdr->flags & BLK_FLAG_FREE) && hdr->size >= aligned) {
-            usize free_size = hdr->size;
-
-            // Check if we can split the block
-            if (free_size >= aligned + sizeof(sc_blk_header) + MIN_REMAINDER) {
-                // === SPLIT BLOCK ===
-                // Calculate offsets
-                addr payload_off = (addr)hdr + sizeof(sc_blk_header);
-                addr new_hdr_off = payload_off + aligned;
-
-                // Update allocated block header
-                hdr->size = aligned;
-                hdr->flags &=
-                    ~(BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT);  // Mark as allocated
-                hdr->next_off = (uint32_t)(new_hdr_off - (addr)sys_page);
-
-                // Create new free block header
-                block_header new_hdr = (block_header)new_hdr_off;
-                new_hdr->next_off = 0;  // Will be last block
-                new_hdr->size = (uint32_t)(free_size - aligned - sizeof(sc_blk_header));
-                new_hdr->flags = BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT;
-
-                ptr = (object)payload_off;
-            } else {
-                // === NO-SPLIT PATH ===
-                hdr->next_off = 0;  // No next block
-                hdr->size = (uint32_t)free_size;
-                hdr->flags &=
-                    ~(BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT);  // Mark as allocated
-
-                ptr = (object)((addr)hdr + sizeof(sc_blk_header));
-            }
-
-            break;
-        }
-        // Move to next block header
-        if (hdr->next_off == 0) {
-            break;  // No more blocks
-        }
-        hdr = (block_header)((addr)sys_page + hdr->next_off);
-    }
-
-exit:
-    return ptr;
-}
-// SYS0 disposal — intentional no-op.
-// All SYS0 allocations (scope table, bootstrap objects) are designed to live
-// for the full lifetime of the memory instance.  They are released implicitly
-// when the process exits; individual disposal is not supported.
-static void sys0_dispose(object ptr) {
-    (void)ptr;
+// ── SYS0 region accessors ─────────────────────────────────────────────────
+static inline sc_registers_s *sys0_regs(void) {
+    return (sc_registers_s *)(s_sys0_base + SYS0_REGISTERS_OFFSET);
 }
 
-// Helper: Bump allocate from a page
-static object slb0_bump_alloc(page_node *pn, usize aligned_size) {
-    addr page_end = pn->page_base + SYS0_PAGE_SIZE;
-    addr alloc_start = pn->page_base + pn->bump_offset;
-    addr alloc_end = alloc_start + aligned_size;
-
-    if (alloc_end > page_end) {
-        return NULL;  // Page exhausted
-    }
-
-    pn->bump_offset += (uint16_t)aligned_size;
-    pn->alloc_count++;
-    return (object)alloc_start;
+static inline sc_ctrl_registry_s *sys0_registry_ptr(void) {
+    return (sc_ctrl_registry_s *)(s_sys0_base + SYS0_REGISTRY_OFFSET);
 }
 
-// Helper: Allocate a new page dynamically and register it in MTIS.
-// Returns the page_idx on success, PAGE_NODE_NULL on failure.
-static uint16_t slb0_alloc_new_page(scope slb0) {
-    if (slb0 == NULL) {
-        return PAGE_NODE_NULL;
-    }
-
-    // Allocate a new 8KB page via mmap
-    void *new_page =
-        mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (new_page == MAP_FAILED) {
-        return PAGE_NODE_NULL;
-    }
-
-    // Register in skip list (MTIS Tier 1)
-    uint16_t page_idx = nodepool_alloc_page_node(slb0);
-    if (page_idx == PAGE_NODE_NULL) {
-        munmap(new_page, SYS0_PAGE_SIZE);
-        return PAGE_NODE_NULL;
-    }
-
-    page_node *pn = nodepool_get_page_node(slb0, page_idx);
-    if (pn == NULL) {
-        munmap(new_page, SYS0_PAGE_SIZE);
-        return PAGE_NODE_NULL;
-    }
-
-    // Initialize page_node (page metadata lives entirely in NodePool)
-    pn->page_base = (addr)new_page;
-    pn->btree_root = NODE_NULL;
-    pn->block_count = 0;
-    pn->bump_offset = 0;
-    pn->alloc_count = 0;
-    for (int i = 0; i < SKIP_LIST_MAX_LEVEL; i++) {
-        pn->forward[i] = PAGE_NODE_NULL;
-    }
-
-    skiplist_insert(slb0, (addr)new_page, page_idx);
-    slb0->page_count++;
-
-    return page_idx;
+static inline struct sc_reclaim_ctrl_s *sys0_slb0_ctrl(void) {
+    return (struct sc_reclaim_ctrl_s *)(s_sys0_base + SYS0_DAT_OFFSET);
 }
 
-// SLB0 allocation (B-Tree search + bump pointer fallback)
+static inline sc_slab_s *sys0_slb0_slab(void) {
+    return (sc_slab_s *)(s_sys0_base + SYS0_DAT_OFFSET + SLB0_CTRL_SZ);
+}
+
+static inline sc_kernel_ctrl_s *sys0_kernel_ctrl(void) {
+    return (sc_kernel_ctrl_s *)(s_sys0_base + SYS0_DAT_OFFSET + KNL_CTRL_OFF);
+}
+
+static inline sc_slab_s *sys0_kernel_slab(void) {
+    return (sc_slab_s *)(s_sys0_base + SYS0_DAT_OFFSET + KNL_CTRL_OFF + KNL_CTRL_SZ);
+}
+
+// ── SLB0 — delegates to kernel controller (MTIS) ──────────────────────────
 static object slb0_alloc(usize size) {
-    object ptr = NULL;
-    bool register_with_frame = false;  // Track if we need to register large allocation
-    scope slb0 = get_scope_table_entry(1);
-    if (slb0 == NULL || size == 0) {
-        goto exit;
-    }
-
-    // Enforce minimum allocation size and alignment
-    usize aligned_size = size < SLB0_MIN_ALLOC ? SLB0_MIN_ALLOC : size;
-    aligned_size = (aligned_size + (kAlign - 1)) & ~(kAlign - 1);
-
-    // Check if in frame context - try frame allocation first
-    // Fall back to normal allocation if frame can't handle it (e.g., too large)
-    if (slb0->frame_active) {
-        ptr = alloc_from_frame(slb0, aligned_size);
-        if (ptr != NULL) {
-            goto exit;  // Frame allocation succeeded
-        }
-        // Fall through to normal allocation for oversized requests
-        // Mark that we need to register this with the frame
-        register_with_frame = true;
-    }
-
-    // MTIS Tier 1: Find page with space using skip list
-    uint16_t page_idx = PAGE_NODE_NULL;
-    if (skiplist_find_for_size(slb0, aligned_size, &page_idx) == OK) {
-        page_node *pn = nodepool_get_page_node(slb0, page_idx);
-        if (pn == NULL) {
-            goto new_page;
-        }
-
-        // MTIS Tier 2: Search page's B-tree for free block (best-fit)
-        node_idx free_node = NODE_NULL;
-        if (btree_page_find_free(slb0, page_idx, aligned_size, &free_node) == OK) {
-            sc_node *node = nodepool_get_btree_node(slb0, free_node);
-            if (node != NULL && node->length >= aligned_size) {
-                ptr = (object)node->start;
-
-                // Split block if remainder is useful
-                if (node->length > aligned_size + SLB0_MIN_ALLOC) {
-                    addr remainder_start = node->start + aligned_size;
-                    usize remainder_length = node->length - aligned_size;
-
-                    // BUGFIX: Reuse existing node for allocated block instead of delete+insert
-                    // This prevents NodePool exhaustion from split operations
-                    node->length = aligned_size;
-                    node->info &= ~NODE_FREE_FLAG;  // Mark as allocated
-
-                    // Insert remainder as new free block
-                    node_idx remainder_idx = NODE_NULL;
-                    btree_page_insert(slb0, page_idx, remainder_start, remainder_length,
-                                      &remainder_idx);
-                    if (remainder_idx != NODE_NULL) {
-                        sc_node *remainder = nodepool_get_btree_node(slb0, remainder_idx);
-                        if (remainder != NULL) {
-                            remainder->info |= NODE_FREE_FLAG;  // Mark as free
-                        }
-                    }
-                } else {
-                    // Use entire block - just mark as allocated
-                    node->info &= ~NODE_FREE_FLAG;  // Clear free flag
-                }
-
-                // Increment alloc_count — re-fetch pn as btree_page_insert may have
-                // triggered mremap, invalidating the old pn pointer.
-                page_node *recycle_pn = nodepool_get_page_node(slb0, page_idx);
-                if (recycle_pn != NULL) {
-                    recycle_pn->alloc_count++;
-                }
-
-                goto exit;
-            }
-        }
-
-        // No free blocks in B-tree, try bump allocation from this page
-        ptr = slb0_bump_alloc(pn, aligned_size);
-        if (ptr != NULL) {
-            // Track allocation in MTIS
-            btree_page_insert(slb0, page_idx, (addr)ptr, aligned_size, NULL);
-            goto exit;
-        }
-    }
-
-new_page: {
-    // Skip list found no suitable page — allocate a new one
-    uint16_t new_page_idx = slb0_alloc_new_page(slb0);
-    if (new_page_idx != PAGE_NODE_NULL) {
-        page_node *new_pn = nodepool_get_page_node(slb0, new_page_idx);
-        if (new_pn != NULL) {
-            ptr = slb0_bump_alloc(new_pn, aligned_size);
-            if (ptr != NULL) {
-                slb0->current_page_off = new_pn->page_base;
-                btree_page_insert(slb0, new_page_idx, (addr)ptr, aligned_size, NULL);
-            }
-        }
-    }
+    sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
+    return k->alloc(k, size);
 }
 
-exit:
-    // Register large allocations with frame if we're in frame context
-    // and allocation succeeded via normal path (not alloc_from_frame)
-    if (register_with_frame && ptr != NULL) {
-        register_large_alloc_with_frame(slb0, (addr)ptr, aligned_size);
-    }
-
-    return ptr;
+static void slb0_free(object ptr) {
+    sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
+    k->free(k, ptr);
 }
 
-// SLB0 disposal (MTIS-based deallocation)
-static void slb0_dispose(object ptr) {
-    if (ptr == NULL) {
-        return;
-    }
-
-    scope slb0 = get_scope_table_entry(1);
-    if (slb0 == NULL) {
-        return;
-    }
-
-    // MTIS Tier 1: Find page containing this address
-    uint16_t page_idx = PAGE_NODE_NULL;
-    if (skiplist_find_containing(slb0, (addr)ptr, &page_idx) != OK) {
-        return;  // Not in any tracked page
-    }
-
-    page_node *pn = nodepool_get_page_node(slb0, page_idx);
-    if (pn == NULL) {
-        return;
-    }
-
-    // MTIS Tier 2: Find allocation in page's B-tree
-    node_idx alloc_node = NODE_NULL;
-    if (btree_page_search(slb0, page_idx, (addr)ptr, &alloc_node) != OK) {
-        return;  // Not tracked in B-tree
-    }
-
-    // Mark block as free
-    sc_node *node = nodepool_get_btree_node(slb0, alloc_node);
-    if (node != NULL) {
-        node->info |= NODE_FREE_FLAG;  // Set free flag
-    }
-
-    // Coalesce with adjacent free blocks
-    btree_page_coalesce(slb0, page_idx, alloc_node);
-
-    // Decrement live allocation count directly on page_node
-    if (pn->alloc_count > 0) {
-        pn->alloc_count--;
-    }
-
-    // Release dynamically-allocated empty pages back to the OS.
-    // Guard: only pages beyond the initial 16-page reservation (contiguous mmap)
-    // can be individually munmap'd.  The initial block is released wholesale on
-    // shutdown via shutdown_memory_system().
-    if (pn->alloc_count == 0) {
-        addr initial_end = slb0->first_page_off + (16u * SYS0_PAGE_SIZE);
-        if (pn->page_base >= initial_end) {
-            // Purge B-tree nodes — returns them to the nodepool free list
-            btree_page_purge(slb0, page_idx);
-
-            // Redirect current_page_off away from this (soon-to-be-unmapped) page
-            if (slb0->current_page_off == pn->page_base) {
-                slb0->current_page_off = slb0->first_page_off;
-            }
-            // Remove page from skip list directory
-            skiplist_remove(slb0, page_idx);
-            // Zero the page_node entry (marks it as inactive)
-            addr page_base = pn->page_base;
-            memset(pn, 0, sizeof(page_node));
-            // Unmap the data page
-            munmap((void *)page_base, SYS0_PAGE_SIZE);
-            // Update scope page count
-            if (slb0->page_count > 0) {
-                slb0->page_count--;
-            }
-            return;  // pn is no longer valid; done
-        }
-    }
-}
-
-// SLB0 realloc: in-place shrink when possible; alloc+copy+dispose for growth.
-// Passing NULL ptr is equivalent to alloc(new_size).
-// Passing new_size == 0 is equivalent to dispose(ptr), returns NULL.
 static object slb0_realloc(object ptr, usize new_size) {
-    if (ptr == NULL) {
-        return (new_size > 0) ? slb0_alloc(new_size) : NULL;
-    }
-    if (new_size == 0) {
-        slb0_dispose(ptr);
-        return NULL;
-    }
+    sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
+    return k->realloc(k, ptr, new_size);
+}
 
-    scope slb0 = get_scope_table_entry(1);
-    if (slb0 == NULL) {
-        return NULL;
-    }
+// ── Allocator facade ──────────────────────────────────────────────────────
+static slab allocator_acquire(usize size) {
+    void *mem = NULL;
+    slab s = NULL;
 
-    // Locate the page and B-tree node tracking this allocation
-    uint16_t page_idx = PAGE_NODE_NULL;
-    if (skiplist_find_containing(slb0, (addr)ptr, &page_idx) != OK) {
-        return NULL;  // not a tracked SLB0 allocation
-    }
-    node_idx alloc_node = NODE_NULL;
-    if (btree_page_search(slb0, page_idx, (addr)ptr, &alloc_node) != OK) {
-        return NULL;
-    }
-    sc_node *node = nodepool_get_btree_node(slb0, alloc_node);
-    if (node == NULL) {
-        return NULL;
-    }
+    if (size == 0) goto exit;
 
-    usize old_size = node->length;
-    usize aligned_new = new_size < SLB0_MIN_ALLOC ? SLB0_MIN_ALLOC : new_size;
-    aligned_new = (aligned_new + (kAlign - 1)) & ~(kAlign - 1);
+    mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) goto exit;
 
-    if (aligned_new <= old_size) {
-        // Shrink: split remainder into a free block if it is large enough to
-        // be useful; otherwise just keep the original block untouched.
-        usize remainder = old_size - aligned_new;
-        if (remainder >= SLB0_MIN_ALLOC * 2) {
-            node->length = (uint32_t)aligned_new;
-            addr rem_start = (addr)ptr + aligned_new;
-            node_idx rem_idx = NODE_NULL;
-            if (btree_page_insert(slb0, page_idx, rem_start, remainder, &rem_idx) == OK &&
-                rem_idx != NODE_NULL) {
-                sc_node *rem = nodepool_get_btree_node(slb0, rem_idx);
-                if (rem != NULL) {
-                    rem->info |= NODE_FREE_FLAG;
-                    btree_page_coalesce(slb0, page_idx, rem_idx);
-                }
-            }
+    s = slb0_alloc(sizeof(sc_slab_s));
+    if (!s) goto cleanup;
+
+    s->base = mem;
+    s->size = size;
+    s->slab_id = s_next_slab_id++;
+    goto exit;
+
+cleanup:
+    munmap(mem, size);
+exit:
+    return s;
+}
+
+static void allocator_release(sc_ctrl_base_s *ctrl) {
+    if (!ctrl) return;
+    if (ctrl->shutdown) ctrl->shutdown(ctrl);  // munmaps the backing mmap region
+
+    // Deregister from registry
+    sc_ctrl_registry_s *reg = sys0_registry_ptr();
+    for (uint8_t i = 1; i < SC_MAX_CONTROLLERS; i++) {
+        if (reg->entries[i] == ctrl) {
+            reg->entries[i] = NULL;
+            if (i == reg->count - 1) reg->count--;
+            break;
         }
-        return ptr;  // same pointer; block shrunk in-place (or unchanged)
     }
 
-    // Grow: no in-place extension in current architecture — alloc + copy + dispose
-    object new_ptr = slb0_alloc(new_size);
-    if (new_ptr == NULL) {
-        return NULL;  // allocation failed; original pointer still valid
+    // Only free SLB0-allocated structs for internally-created controllers.
+    // shutdown() already munmap'd the backing mmap region; we only slb0_free the descriptors.
+    if (!ctrl->external) {
+        slb0_free(ctrl->backing);
+        slb0_free(ctrl);
     }
-    memcpy(new_ptr, ptr, old_size);
-    slb0_dispose(ptr);
-    return new_ptr;
 }
 
-// Get scope table entry by index
-scope get_scope_table_entry(usize index) {
-    if (scope_table == NULL || index >= SCOPE_TABLE_COUNT) {
+// ── Registry helper ─────────────────────────────────────────────────────────
+// Returns registry index on success, 0 on failure (slot 0 is always SLB0).
+static uint8_t registry_insert(sc_ctrl_base_s *ctrl) {
+    sc_ctrl_registry_s *reg = sys0_registry_ptr();
+    // Search for a NULL slot in user range (1..SC_MAX_CONTROLLERS-1)
+    for (uint8_t i = 1; i < SC_MAX_CONTROLLERS; i++) {
+        if (!reg->entries[i]) {
+            reg->entries[i] = ctrl;
+            if (i >= reg->count) reg->count = i + 1;
+            return i;
+        }
+    }
+    return 0;  // full
+}
+
+static bump_allocator allocator_create_bump(usize size) {
+    if (size == 0) return NULL;
+
+    void *mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return NULL;
+
+    slab s = slb0_alloc(sizeof(sc_slab_s));
+    if (!s) {
+        munmap(mem, size);
         return NULL;
     }
-    return &scope_table[index];
+    s->base = mem;
+    s->size = size;
+    s->slab_id = s_next_slab_id++;
+
+    bump_allocator a = slb0_alloc(sizeof(struct sc_bump_ctrl_s));
+    if (!a) {
+        munmap(mem, size);
+        slb0_free(s);
+        return NULL;
+    }
+
+    a->base.policy = POLICY_BUMP;
+    a->base.backing = s;
+    a->base.struct_size = sizeof(struct sc_bump_ctrl_s);
+    a->base.external = false;
+    a->base.shutdown = bump_ctrl_shutdown;
+    a->cursor = 0;
+    a->capacity = size & ~(usize)(kAlign - 1);
+    a->frame_depth = 0;
+    a->alloc = bump_ctrl_alloc;
+    a->reset = bump_ctrl_reset;
+    a->frame_begin = bump_ctrl_frame_begin;
+    a->frame_end = bump_ctrl_frame_end;
+
+    if (!registry_insert((sc_ctrl_base_s *)a)) {
+        slb0_free(a);
+        munmap(mem, size);
+        slb0_free(s);
+        return NULL;
+    }
+    return a;
 }
 
-#if 1  // Region: Scope Interface Functions
-// Get current scope pointer from R7
-void *memory_get_current_scope(void) {
-    return (void *)registers_get(REG_CURRENT_SCOPE);  // R7 holds the current scope pointer
+static reclaim_allocator allocator_create_reclaim(usize size) {
+    if (size == 0) return NULL;
+
+    void *mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return NULL;
+
+    slab s = slb0_alloc(sizeof(sc_slab_s));
+    if (!s) {
+        munmap(mem, size);
+        return NULL;
+    }
+    s->base = mem;
+    s->size = size;
+    s->slab_id = s_next_slab_id++;
+
+    reclaim_allocator r = slb0_alloc(sizeof(struct sc_reclaim_ctrl_s));
+    if (!r) {
+        munmap(mem, size);
+        slb0_free(s);
+        return NULL;
+    }
+
+    r->base.policy = POLICY_RECLAIM;
+    r->base.backing = s;
+    r->base.struct_size = sizeof(struct sc_reclaim_ctrl_s);
+    r->base.external = false;
+    r->base.shutdown = reclaim_ctrl_shutdown;
+    r->bump = 0;
+    r->capacity = size;
+    r->free_head = NULL;
+    r->seq = 0;
+    r->frame_seq = 0;
+    r->alloc = reclaim_ctrl_alloc;
+    r->free = reclaim_ctrl_free;
+    r->realloc = reclaim_ctrl_realloc;
+    r->frame_begin = reclaim_ctrl_frame_begin;
+    r->frame_end = reclaim_ctrl_frame_end;
+
+    if (!registry_insert((sc_ctrl_base_s *)r)) {
+        slb0_free(r);
+        munmap(mem, size);
+        slb0_free(s);
+        return NULL;
+    }
+    return r;
 }
 
-// Restore previous scope via current->prev chain (v0.2.3)
-// Clears current->prev so the scope can be re-activated later.
-static void scope_restore(void) {
-    scope current = (scope)registers_get(REG_CURRENT_SCOPE);
-    if (current == NULL) {
+static sc_ctrl_base_s *allocator_create_custom(usize size, ctrl_factory_fn factory) {
+    if (size == 0 || !factory) return NULL;
+
+    void *mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return NULL;
+
+    slab s = slb0_alloc(sizeof(sc_slab_s));
+    if (!s) {
+        munmap(mem, size);
+        return NULL;
+    }
+    s->base = mem;
+    s->size = size;
+    s->slab_id = s_next_slab_id++;
+
+    sc_ctrl_base_s *ctrl = factory(s);
+    if (!ctrl) {
+        munmap(mem, size);
+        slb0_free(s);
+        return NULL;
+    }
+
+    ctrl->external = false;
+
+    if (!registry_insert(ctrl)) {
+        if (ctrl->shutdown) ctrl->shutdown(ctrl);
+        slb0_free(ctrl);
+        munmap(mem, size);
+        slb0_free(s);
+        return NULL;
+    }
+    return ctrl;
+}
+
+static void allocator_register_ctrl(sc_ctrl_base_s *ctrl) {
+    if (!ctrl) return;
+    ctrl->external = true;
+    registry_insert(ctrl);
+}
+
+// ── SYS0 bootstrap ────────────────────────────────────────────────────────
+static void bootstrap_sys0(void) {
+    void *base =
+        mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (base == MAP_FAILED) return;
+    memset(base, 0, SYS0_PAGE_SIZE);
+    s_sys0_base = (addr)base;
+    s_state |= MEM_STATE_SYS0_MAPPED;
+    sys0_regs()->R[0] = s_sys0_base;
+}
+
+static void bootstrap_slb0(void) {
+    void *mem = mmap(NULL, SLB0_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return;
+
+    sc_slab_s *slb0_slab = sys0_slb0_slab();
+    slb0_slab->base = mem;
+    slb0_slab->size = SLB0_SIZE;
+    slb0_slab->slab_id = 1u;
+
+    struct sc_reclaim_ctrl_s *ctrl = sys0_slb0_ctrl();
+    ctrl->base.policy = POLICY_RECLAIM;
+    ctrl->base.backing = slb0_slab;
+    ctrl->base.struct_size = sizeof(struct sc_reclaim_ctrl_s);
+    ctrl->base.shutdown = NULL;  // SLB0 is never released via Allocator.release()
+    ctrl->bump = 0;
+    ctrl->capacity = SLB0_SIZE;
+    ctrl->free_head = NULL;
+    ctrl->seq = 0;
+    ctrl->frame_seq = 0;
+    ctrl->alloc = reclaim_ctrl_alloc;
+    ctrl->free = reclaim_ctrl_free;
+    ctrl->realloc = reclaim_ctrl_realloc;
+    ctrl->frame_begin = reclaim_ctrl_frame_begin;
+    ctrl->frame_end = reclaim_ctrl_frame_end;
+
+    sc_ctrl_registry_s *reg = sys0_registry_ptr();
+    reg->entries[0] = (sc_ctrl_base_s *)ctrl;
+    reg->count = 1;
+
+    sys0_regs()->R[7] = (addr)ctrl;
+    s_state |= MEM_STATE_SLB0_READY;
+}
+
+static void bootstrap_kernel(void) {
+    // mmap 2 MB kernel arena
+    void *mem =
+        mmap(NULL, KNL_SLAB_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return;
+
+    // mmap 8 KB nodepool region
+    void *np_mem =
+        mmap(NULL, KNL_NODEPOOL_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (np_mem == MAP_FAILED) {
+        munmap(mem, KNL_SLAB_SIZE);
         return;
     }
-    scope p = current->prev;
-    if (p == NULL) {
-        return;  // At root (SLB0/SYS0) — no-op
-    }
-    current->prev = NULL;  // Clear so scope can be set again later
-    registers_set(REG_CURRENT_SCOPE, (addr)p);
+
+    // Populate kernel slab descriptor (baked into SYS0 DAT)
+    sc_slab_s *kslab = sys0_kernel_slab();
+    kslab->base = mem;
+    kslab->size = KNL_SLAB_SIZE;
+    kslab->slab_id = 0u;  // out-of-band; not registered
+
+    // Initialise nodepool header
+    knl_nodepool_hdr_s *np = (knl_nodepool_hdr_s *)np_mem;
+    np->capacity = KNL_NODEPOOL_SIZE;
+    np->page_count = 0;
+    np->page_alloc_off = sizeof(knl_nodepool_hdr_s);  // page_nodes grow up
+    np->btree_alloc_off = KNL_NODEPOOL_SIZE;          // btree_nodes grow down
+    np->skip_head = KNL_PAGE_NULL;
+    np->btree_free_head = KNL_NODE_NULL;
+
+    // Populate kernel ctrl (baked into SYS0 DAT)
+    sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
+    k->base.policy = POLICY_KERNEL;
+    k->base.backing = kslab;
+    k->base.struct_size = sizeof(sc_kernel_ctrl_s);
+    k->base.shutdown = NULL;  // kernel ctrl is never released
+    k->bump = 0;
+    k->capacity = KNL_SLAB_SIZE;
+    k->nodepool = np;
+    k->alloc = kernel_alloc;
+    k->free = kernel_free;
+    k->realloc = kernel_realloc;
+
+    s_state |= MEM_STATE_KERNEL_READY;
 }
 
-// Set current scope, recording predecessor in s->prev (v0.2.3).
-// Returns ERR if s is already active in the chain (s->prev != NULL).
-integer memory_set_current_scope(void *scope_ptr) {
-    if (scope_ptr == NULL) {
-        return ERR;
-    }
-    scope s = (scope)scope_ptr;
-    if (s->prev != NULL) {
-        return ERR;  // s already active in chain (prev is set by create or a prior set)
-    }
-    scope current = (scope)registers_get(REG_CURRENT_SCOPE);
-    if (s == current) {
-        return OK;  // Already current with no prev — harmless no-op
-    }
-    s->prev = current;
-    registers_set(REG_CURRENT_SCOPE, (addr)s);
-    return OK;
+void init_memory_system(void) {
+    if (s_state & MEM_STATE_READY) return;  // idempotent
+    bootstrap_sys0();
+    if (!(s_state & MEM_STATE_SYS0_MAPPED)) return;
+    bootstrap_kernel();
+    if (!(s_state & MEM_STATE_KERNEL_READY)) return;
+    bootstrap_slb0();
+    if (!(s_state & MEM_STATE_SLB0_READY)) return;
+    s_state |= MEM_STATE_BOOTSTRAP_COMPLETE | MEM_STATE_READY;
 }
-// Allocate from current scope (dispatch based on scope_id)
-object memory_alloc(usize size) {
-    object ptr = NULL;
-    sc_scope *current_scope = (sc_scope *)memory_get_current_scope();
-    if (current_scope == NULL) {
-        goto exit;
-    }
 
-    // Dispatch based on scope_id
-    switch (current_scope->scope_id) {
-        case 0:  // SYS0
-            ptr = sys0_alloc(size);
-            break;
-        case 1:  // SLB0
-            ptr = slb0_alloc(size);
-            break;
-        default:  // User arenas (2-15)
-            ptr = arena_alloc(current_scope, size);
-            break;
+void cleanup_memory_system(void) {
+    if (s_sys0_base == ADDR_EMPTY) return;
+    // Shut down any live user controllers (entries[1..count-1]) — munmaps their backing slabs.
+    // Do NOT slb0_free their structs; SLB0 itself is torn down below.
+    sc_ctrl_registry_s *reg = sys0_registry_ptr();
+    for (uint8_t i = 1; i < reg->count; i++) {
+        sc_ctrl_base_s *ctrl = reg->entries[i];
+        if (ctrl && ctrl->shutdown) ctrl->shutdown(ctrl);
     }
-
-exit:
-    return ptr;
+    // munmap SLB0 arena
+    sc_slab_s *slb0 = sys0_slb0_slab();
+    if (slb0->base) munmap(slb0->base, slb0->size);
+    // munmap kernel nodepool + kernel arena
+    sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
+    if (k->nodepool) munmap(k->nodepool, k->nodepool->capacity);
+    sc_slab_s *kslab = sys0_kernel_slab();
+    if (kslab->base) munmap(kslab->base, kslab->size);
+    munmap((void *)s_sys0_base, SYS0_PAGE_SIZE);
+    s_sys0_base = ADDR_EMPTY;
+    s_state = 0;
+    // Reset trusted subsystem state so init_memory_system() starts clean
+    for (uint8_t i = 0; i < TRUSTED_SLOT_MAX; i++) {
+        s_trusted_caps[i] = NULL;
+    }
+    s_next_trusted_slot = TRUSTED_SLOT_MIN;
 }
-// Dispose to current scope (dispatch based on scope_id)
-void memory_dispose(object ptr) {
-    sc_scope *current_scope = (sc_scope *)memory_get_current_scope();
-    if (current_scope == NULL || ptr == NULL) {
-        return;
-    }
 
-    // Dispatch based on scope_id
-    switch (current_scope->scope_id) {
-        case 0:  // SYS0
-            sys0_dispose(ptr);
-            break;
-        case 1:  // SLB0
-            slb0_dispose(ptr);
-            break;
-        default:  // User arenas (2-15)
-            arena_dispose_ptr(current_scope, ptr);
-            break;
-    }
+// ── Diagnostics ───────────────────────────────────────────────────────────
+addr memory_sys0_base(void) {
+    return s_sys0_base;
 }
-// Allocate using an explicit scope
-static object memory_alloc_for_scope(void *scope_ptr, usize size) {
-    object ptr = NULL;
-    sc_scope *explicit_scope = (sc_scope *)scope_ptr;
-    if (explicit_scope == NULL) {
-        goto exit;
-    }
 
-    // Dispatch based on scope_id
-    switch (explicit_scope->scope_id) {
-        case 0:  // SYS0
-            ptr = sys0_alloc(size);
-            break;
-        case 1:  // SLB0
-            ptr = slb0_alloc(size);
-            break;
-        default:  // User arenas (2-15)
-            ptr = arena_alloc(explicit_scope, size);
-            break;
-    }
-
-exit:
-    return ptr;
-}
-// Dispose using an explicit scope
-static void memory_dispose_for_scope(void *scope_ptr, object ptr) {
-    sc_scope *explicit_scope = (sc_scope *)scope_ptr;
-    if (explicit_scope == NULL || ptr == NULL) {
-        return;
-    }
-
-    // Dispatch based on scope_id
-    switch (explicit_scope->scope_id) {
-        case 0:  // SYS0
-            sys0_dispose(ptr);
-            break;
-        case 1:  // SLB0
-            slb0_dispose(ptr);
-            break;
-        default:  // User arenas (2-15)
-            arena_dispose_ptr(explicit_scope, ptr);
-            break;
-    }
-}
-// Get the current scope configuration
-sbyte memory_get_current_scope_config(int mask_type) {
-    sbyte result = 0;
-    sc_scope *current_scope = (sc_scope *)memory_get_current_scope();
-    if (current_scope == NULL) {
-        goto exit;
-    }
-
-    switch (mask_type) {
-        case SCOPE_POLICY:
-            result = current_scope->policy;
-            break;
-        case SCOPE_FLAG:
-            result = current_scope->flags;
-            break;
-        default:
-            result = 0;  // Invalid mask_type
-            break;
-    }
-exit:
-    return result;
-}
-// Get configuration from explicit scope
-static sbyte memory_get_scope_config(void *scope_ptr, int mask_type) {
-    sbyte result = 0;
-    sc_scope *explicit_scope = (sc_scope *)scope_ptr;
-    if (explicit_scope == NULL) {
-        goto exit;
-    }
-
-    switch (mask_type) {
-        case SCOPE_POLICY:
-            result = explicit_scope->policy;
-            break;
-        case SCOPE_FLAG:
-            result = explicit_scope->flags;
-            break;
-        default:
-            result = 0;  // Invalid mask_type
-            break;
-    }
-exit:
-    return result;
-}
-#endif
-
-#if 1  // Region: Internal Memory Functions
-// Get SYS0 size
 usize memory_sys0_size(void) {
-    return sizeof(sys_page);
-}
-// Check memory state (returns bitfield of MEM_STATE_* flags)
-sbyte memory_state(void) {
-    sbyte state = 0;
-    // Check if memory system is ready
-    if (sys0 != NULL && sys0 == (void *)sys_page) {
-        state |= MEM_STATE_READY;
-    }
-
-    // Check sys0 page alignment
-    if (((addr)sys_page % kAlign) == 0) {
-        state |= MEM_STATE_ALIGN_SYS0;
-    }
-
-    // Check header size alignment
-    if ((sizeof(sc_blk_header) % kAlign) == 0) {
-        state |= MEM_STATE_ALIGN_HEADER;
-    }
-
-    // Check footer placement alignment
-    sc_blk_footer *ftr = (sc_blk_footer *)(sys_page + SYS0_PAGE_SIZE - sizeof(sc_blk_footer));
-    if (((addr)ftr % _Alignof(uint32_t)) == 0) {
-        state |= MEM_STATE_ALIGN_FOOTER;
-    }
-
-    // Check if user memory (SLB0) is ready
-    scope cur_scope = (scope)memory_get_current_scope();
-    if (cur_scope != NULL && cur_scope->scope_id == 1) {
-        state |= MEM_STATE_USER_READY;
-    }
-
-    // Check if bootstrap is complete
-    extern bool __bootstrap_complete;
-    if (__bootstrap_complete) {
-        state |= MEM_STATE_BOOTSTRAP_COMPLETE;
-    }
-
-    return state;
+    return SYS0_PAGE_SIZE;
 }
 
-// Return pointer to SYS0 first block header
-block_header memory_get_first_header(void) {
-    block_header hdr = NULL;
-    if (!(memory_state() & MEM_STATE_READY)) {
-        goto exit;
+static bool allocator_is_ready(void) {
+    return (s_state & MEM_STATE_READY) != 0;
+}
+
+uint8_t memory_state(void) {
+    return s_state;
+}
+
+addr memory_r7(void) {
+    if (s_sys0_base == ADDR_EMPTY) return ADDR_EMPTY;
+    return sys0_regs()->R[7];
+}
+
+sc_ctrl_registry_s *memory_registry(void) {
+    if (s_sys0_base == ADDR_EMPTY) return NULL;
+    return sys0_registry_ptr();
+}
+
+sc_kernel_ctrl_s *memory_kernel_ctrl(void) {
+    if (s_sys0_base == ADDR_EMPTY) return NULL;
+    return sys0_kernel_ctrl();
+}
+
+sc_trusted_cap_t *memory_trusted_cap(uint8_t slot) {
+    if (slot < TRUSTED_SLOT_MIN || slot > TRUSTED_SLOT_MAX) return NULL;
+    return s_trusted_caps[slot - 1];
+}
+
+void memory_trusted_reset(void) {
+    if (s_sys0_base == ADDR_EMPTY) return;
+    for (uint8_t i = 0; i < TRUSTED_SLOT_MAX; i++) {
+        sc_trusted_cap_t *cap = s_trusted_caps[i];
+        if (cap) {
+            // Unmap the dedicated arena (separate from SLB0 — safe to release)
+            if (cap->arena && cap->arena->base) {
+                munmap(cap->arena->base, cap->arena->size);
+                cap->arena->base = NULL;
+            }
+            // Clear the register slot
+            sys0_regs()->R[i + 1] = ADDR_EMPTY;
+        }
+        s_trusted_caps[i] = NULL;
     }
-    hdr = (block_header)(sys_page + FIRST_BLOCK_OFFSET);
-
-exit:
-    return hdr;
+    s_next_trusted_slot = TRUSTED_SLOT_MIN;
 }
-// Return pointer to SYS0 last block footer
-block_footer memory_get_last_footer(void) {
-    block_footer ftr = NULL;
-    if (!(memory_state() & MEM_STATE_READY)) {
-        goto exit;
+
+void slb_release_raw(slab s) {
+    if (!s || !s->base) return;
+    munmap(s->base, s->size);
+    s->base = NULL;
+    slb0_free(s);
+}
+
+// ── Trusted subsystem grant ────────────────────────────────────────────
+// Alloc/free/realloc hooks routed through a trusted module's reclaim ctrl.
+// The ctrl pointer is captured in s_trusted_caps at grant time; the hooks
+// look it up by the stored slot so each module gets its own controller path.
+//
+// We use thin top-level wrappers that forward to the stored cap's ctrl.
+// One set of wrappers per slot avoids storing per-cap function pointer
+// context in the hooks themselves.
+//
+// Limitation: only reclaim-policy trusted modules get wired alloc_use hooks;
+// bump-policy trusted modules receive a zeroed alloc_use (they manage alloc
+// themselves via cap->ctrl cast to bump_allocator).
+
+static object trusted_slot_alloc(uint8_t slot, usize size) {
+    sc_trusted_cap_t *cap = s_trusted_caps[slot - 1];
+    if (!cap || !cap->ctrl) return NULL;
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    return r->alloc(r, size);
+}
+
+static void trusted_slot_free(uint8_t slot, object ptr) {
+    sc_trusted_cap_t *cap = s_trusted_caps[slot - 1];
+    if (!cap || !cap->ctrl || !ptr) return;
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    r->free(r, ptr);
+}
+
+static object trusted_slot_realloc(uint8_t slot, object ptr, usize new_size) {
+    sc_trusted_cap_t *cap = s_trusted_caps[slot - 1];
+    if (!cap || !cap->ctrl) return NULL;
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    return r->realloc(r, ptr, new_size);
+}
+
+// Per-slot shims — one per R slot so each module's alloc_use hooks are distinct
+// function pointers (required by sc_alloc_use_t which stores bare fn pointers
+// with no context parameter).
+#define TRUSTED_SHIM(N)                                       \
+    static object trusted_r##N##_alloc(usize s) {             \
+        return trusted_slot_alloc(N, s);                      \
+    }                                                         \
+    static void trusted_r##N##_free(object p) {               \
+        trusted_slot_free(N, p);                              \
+    }                                                         \
+    static object trusted_r##N##_realloc(object p, usize s) { \
+        return trusted_slot_realloc(N, p, s);                 \
     }
-    ftr = (block_footer)(sys_page + LAST_FOOTER_OFFSET);
 
-exit:
-    return ftr;
-}
-// Get slab slot base address
-addr memory_get_slots_base(void) {
-    return (addr)(sys_page + SYS0_SLAB_TABLE_OFFSET);
-}
-// Get slab slot end address
-addr memory_get_slots_end(void) {
-    return (addr)(sys_page + SYS0_SLAB_TABLE_OFFSET + SYS0_SLAB_TABLE_SIZE);
-}
-#endif
+TRUSTED_SHIM(1)
+TRUSTED_SHIM(2)
+TRUSTED_SHIM(3)
+TRUSTED_SHIM(4)
+TRUSTED_SHIM(5)
+TRUSTED_SHIM(6)
 
-#if 1  // Region: Frame / Scope Helpers (v0.2.3)
-/**
- * Allocate a new page for any scope and register it with MTIS (skip list + B-tree).
- * Page metadata (bump_offset, alloc_count) lives entirely in the NodePool page_node.
- * No sentinel header is written to the page itself — byte 0 is allocatable.
- *
- * @param s Scope to allocate page in (must have NodePool initialized)
- * @return pointer to the new page_node, or NULL on failure
- */
-static page_node *scope_alloc_tracked_page(scope s) {
-    if (s == NULL) {
+typedef object (*alloc_fn)(usize);
+typedef void (*free_fn)(object);
+typedef object (*realloc_fn)(object, usize);
+
+static const alloc_fn s_trusted_alloc_shims[TRUSTED_SLOT_MAX] = {
+    trusted_r1_alloc, trusted_r2_alloc, trusted_r3_alloc,
+    trusted_r4_alloc, trusted_r5_alloc, trusted_r6_alloc};
+static const free_fn s_trusted_free_shims[TRUSTED_SLOT_MAX] = {trusted_r1_free, trusted_r2_free,
+                                                               trusted_r3_free, trusted_r4_free,
+                                                               trusted_r5_free, trusted_r6_free};
+static const realloc_fn s_trusted_realloc_shims[TRUSTED_SLOT_MAX] = {
+    trusted_r1_realloc, trusted_r2_realloc, trusted_r3_realloc,
+    trusted_r4_realloc, trusted_r5_realloc, trusted_r6_realloc};
+
+sc_trusted_cap_t *trusted_grant(const char *name, usize size, sc_alloc_policy policy) {
+    (void)name;
+    if (s_next_trusted_slot > TRUSTED_SLOT_MAX) return NULL;
+    if (policy == POLICY_KERNEL) return NULL;  // reserved for Ring0
+    // 0 (unset — old module descriptors compiled before arena_policy was added) → reclaim
+    if (policy == 0) policy = POLICY_RECLAIM;
+
+    usize arena_size = (size == 0) ? TRUSTED_SLAB_DEFAULT : size;
+    uint8_t slot = s_next_trusted_slot;
+
+    // Allocate the slab directly via mmap — NOT through SLB0 (trusted arenas are isolated)
+    void *mem = mmap(NULL, arena_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return NULL;
+
+    // Allocate slab descriptor and ctrl from SLB0
+    slab s = slb0_alloc(sizeof(sc_slab_s));
+    if (!s) goto fail_mem;
+    s->base = mem;
+    s->size = arena_size;
+    s->slab_id = s_next_slab_id++;
+
+    sc_ctrl_base_s *ctrl = NULL;
+    if (policy == POLICY_BUMP) {
+        struct sc_bump_ctrl_s *b = slb0_alloc(sizeof(struct sc_bump_ctrl_s));
+        if (!b) goto fail_slab;
+        b->base.policy = POLICY_BUMP;
+        b->base.backing = s;
+        b->base.struct_size = sizeof(struct sc_bump_ctrl_s);
+        b->base.external = true;
+        b->base.shutdown = bump_ctrl_shutdown;
+        b->cursor = 0;
+        b->capacity = arena_size;
+        b->frame_depth = 0;
+        b->alloc = bump_ctrl_alloc;
+        b->reset = bump_ctrl_reset;
+        b->frame_begin = bump_ctrl_frame_begin;
+        b->frame_end = bump_ctrl_frame_end;
+        ctrl = (sc_ctrl_base_s *)b;
+    } else {
+        struct sc_reclaim_ctrl_s *r = slb0_alloc(sizeof(struct sc_reclaim_ctrl_s));
+        if (!r) goto fail_slab;
+        r->base.policy = POLICY_RECLAIM;
+        r->base.backing = s;
+        r->base.struct_size = sizeof(struct sc_reclaim_ctrl_s);
+        r->base.external = true;
+        r->base.shutdown = reclaim_ctrl_shutdown;
+        r->bump = 0;
+        r->capacity = arena_size;
+        r->free_head = NULL;
+        r->seq = 0;
+        r->frame_seq = 0;
+        r->alloc = reclaim_ctrl_alloc;
+        r->free = reclaim_ctrl_free;
+        r->realloc = reclaim_ctrl_realloc;
+        r->frame_begin = reclaim_ctrl_frame_begin;
+        r->frame_end = reclaim_ctrl_frame_end;
+        ctrl = (sc_ctrl_base_s *)r;
+    }
+
+    sc_trusted_cap_t *cap = slb0_alloc(sizeof(sc_trusted_cap_t));
+    if (!cap) goto fail_ctrl;
+
+    cap->reg_slot = slot;
+    cap->arena = s;
+    cap->ctrl = ctrl;
+
+    uint8_t idx = (uint8_t)(slot - 1);
+    if (policy == POLICY_RECLAIM) {
+        cap->alloc_use.alloc = s_trusted_alloc_shims[idx];
+        cap->alloc_use.release = s_trusted_free_shims[idx];
+        cap->alloc_use.resize = s_trusted_realloc_shims[idx];
+    } else {
+        // Bump ctrl: caller uses cap->ctrl directly (cast to bump_allocator)
+        cap->alloc_use.alloc = NULL;
+        cap->alloc_use.release = NULL;
+        cap->alloc_use.resize = NULL;
+    }
+
+    // Stamp register slot and store cap
+    sys0_regs()->R[slot] = (addr)ctrl;
+    s_trusted_caps[idx] = cap;
+    s_next_trusted_slot++;
+    return cap;
+
+fail_ctrl:
+    slb0_free(ctrl);
+fail_slab:
+    slb0_free(s);
+fail_mem:
+    munmap(mem, arena_size);
+    return NULL;
+}
+
+// ── Bump controller helpers ────────────────────────────────────────────────
+static object bump_ctrl_alloc(struct sc_bump_ctrl_s *c, usize size) {
+    if (!c || size == 0) return NULL;
+    usize aligned = (c->cursor + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1);
+    if (aligned + size > c->capacity) return NULL;
+    object ptr = (uint8_t *)c->base.backing->base + aligned;
+    c->cursor = aligned + size;
+    return ptr;
+}
+
+static void bump_ctrl_reset(struct sc_bump_ctrl_s *c, bool zero) {
+    if (!c) return;
+    if (zero) memset(c->base.backing->base, 0, c->capacity);
+    c->cursor = 0;
+    c->frame_depth = 0;
+}
+
+static frame bump_ctrl_frame_begin(struct sc_bump_ctrl_s *c) {
+    if (!c || c->frame_depth >= SC_FRAME_DEPTH_MAX) return FRAME_NULL;
+    c->frame_stack[c->frame_depth++] = c->cursor;
+    return (frame)(c->cursor + 1);  // +1 so cursor==0 never equals FRAME_NULL
+}
+
+static void bump_ctrl_frame_end(struct sc_bump_ctrl_s *c, frame f) {
+    if (!c || c->frame_depth == 0) return;
+    c->cursor = (usize)f - 1;  // reverse the +1 sentinel offset
+    c->frame_depth--;
+}
+
+static void bump_ctrl_shutdown(sc_ctrl_base_s *base) {
+    if (!base || !base->backing) return;
+    munmap(base->backing->base, base->backing->size);
+    base->backing->base = NULL;
+}
+
+// ── Reclaim controller helpers ─────────────────────────────────────────────
+
+// Insert hdr into the free list, maintaining address order, coalescing adjacent blocks.
+static void reclaim_free_block(struct sc_reclaim_ctrl_s *c, rc_block_hdr_s *hdr) {
+    if (!c || !hdr) return;
+    usize hdr_sz = sizeof(rc_block_hdr_s);
+    hdr->flags = RC_FLAG_FREE;
+    hdr->seq = 0;
+
+    // Find insertion point in address-ordered free list
+    rc_block_hdr_s **pp = &c->free_head;
+    rc_block_hdr_s *next = c->free_head;
+    while (next && next < hdr) {
+        pp = (rc_block_hdr_s **)((uint8_t *)next + hdr_sz);
+        next = *(rc_block_hdr_s **)((uint8_t *)next + hdr_sz);
+    }
+
+    // Link hdr → next
+    *(rc_block_hdr_s **)((uint8_t *)hdr + hdr_sz) = next;
+    *pp = hdr;
+
+    // Coalesce hdr → next if adjacent
+    if (next) {
+        uint8_t *hdr_end = (uint8_t *)hdr + hdr_sz + hdr->size;
+        if (hdr_end == (uint8_t *)next) {
+            hdr->size += hdr_sz + next->size;
+            *(rc_block_hdr_s **)((uint8_t *)hdr + hdr_sz) =
+                *(rc_block_hdr_s **)((uint8_t *)next + hdr_sz);
+        }
+    }
+
+    // Coalesce prev → hdr if adjacent (prev is the node that now points to hdr)
+    // Re-read: pp was left pointing into the prev node's next-ptr slot (or &free_head).
+    // Walk once more to find the predecessor.
+    rc_block_hdr_s *prev = NULL;
+    rc_block_hdr_s *cur = c->free_head;
+    while (cur && cur != hdr) {
+        prev = cur;
+        cur = *(rc_block_hdr_s **)((uint8_t *)cur + hdr_sz);
+    }
+    if (prev) {
+        uint8_t *prev_end = (uint8_t *)prev + hdr_sz + prev->size;
+        if (prev_end == (uint8_t *)hdr) {
+            prev->size += hdr_sz + hdr->size;
+            *(rc_block_hdr_s **)((uint8_t *)prev + hdr_sz) =
+                *(rc_block_hdr_s **)((uint8_t *)hdr + hdr_sz);
+        }
+    }
+}
+
+// Core alloc: first-fit from free list, then bump expansion.
+static object reclaim_alloc_from(struct sc_reclaim_ctrl_s *c, usize size, uint32_t seq) {
+    usize hdr_sz = sizeof(rc_block_hdr_s);
+    usize need = (size + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1);
+
+    // First-fit from free list
+    rc_block_hdr_s **pp = &c->free_head;
+    rc_block_hdr_s *cur = c->free_head;
+    while (cur) {
+        rc_block_hdr_s **next_pp = (rc_block_hdr_s **)((uint8_t *)cur + hdr_sz);
+        if (cur->size >= need) {
+            // Split if remainder can hold a header + at least kAlign bytes
+            if (cur->size >= need + hdr_sz + kAlign) {
+                rc_block_hdr_s *rem = (rc_block_hdr_s *)((uint8_t *)cur + hdr_sz + need);
+                rem->size = cur->size - need - hdr_sz;
+                rem->flags = RC_FLAG_FREE;
+                rem->seq = 0;
+                *(rc_block_hdr_s **)((uint8_t *)rem + hdr_sz) = *next_pp;
+                *pp = rem;
+            } else {
+                *pp = *next_pp;
+            }
+            cur->size = need;
+            cur->flags = RC_FLAG_LIVE;
+            cur->seq = seq;
+            return (uint8_t *)cur + hdr_sz;
+        }
+        pp = next_pp;
+        cur = *next_pp;
+    }
+
+    // Bump expansion
+    usize aligned = (c->bump + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1);
+    usize total = hdr_sz + need;
+    if (aligned + total > c->capacity) return NULL;
+    rc_block_hdr_s *hdr = (rc_block_hdr_s *)((uint8_t *)c->base.backing->base + aligned);
+    hdr->size = need;
+    hdr->seq = seq;
+    hdr->flags = RC_FLAG_LIVE;
+    c->bump = aligned + total;
+    return (uint8_t *)hdr + hdr_sz;
+}
+
+static object reclaim_ctrl_alloc(struct sc_reclaim_ctrl_s *c, usize size) {
+    if (!c || size == 0) return NULL;
+    return reclaim_alloc_from(c, size, c->frame_seq);
+}
+
+static void reclaim_ctrl_free(struct sc_reclaim_ctrl_s *c, object ptr) {
+    if (!c || !ptr) return;
+    rc_block_hdr_s *hdr = (rc_block_hdr_s *)((uint8_t *)ptr - sizeof(rc_block_hdr_s));
+    reclaim_free_block(c, hdr);
+}
+
+static object reclaim_ctrl_realloc(struct sc_reclaim_ctrl_s *c, object ptr, usize new_size) {
+    if (!c) return NULL;
+    if (!ptr) return reclaim_ctrl_alloc(c, new_size);
+    if (new_size == 0) {
+        reclaim_ctrl_free(c, ptr);
         return NULL;
     }
 
-    // Allocate a new 8KB page via mmap
-    void *new_page =
-        mmap(NULL, SYS0_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (new_page == MAP_FAILED) {
-        return NULL;
+    rc_block_hdr_s *hdr = (rc_block_hdr_s *)((uint8_t *)ptr - sizeof(rc_block_hdr_s));
+    usize need = (new_size + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1);
+
+    if (need <= hdr->size) {
+        hdr->size = need;
+        return ptr;
+    }  // shrink in-place
+
+    object newp = reclaim_alloc_from(c, new_size, hdr->seq);
+    if (!newp) return NULL;
+    memcpy(newp, ptr, hdr->size);
+    reclaim_free_block(c, hdr);
+    return newp;
+}
+
+static frame reclaim_ctrl_frame_begin(struct sc_reclaim_ctrl_s *c) {
+    if (!c) return FRAME_NULL;
+    c->seq++;
+    c->frame_seq = c->seq;
+    return (frame)c->seq;  // seq is always >= 1 after increment, never FRAME_NULL(0)
+}
+
+static void reclaim_ctrl_frame_end(struct sc_reclaim_ctrl_s *c, frame f) {
+    if (!c || f == FRAME_NULL) return;
+    uint32_t tag = (uint32_t)f;
+    // Walk all live blocks via bump region; free any with seq >= tag
+    usize hdr_sz = sizeof(rc_block_hdr_s);
+    uint8_t *base = (uint8_t *)c->base.backing->base;
+    usize off = 0;
+    while (off + hdr_sz <= c->bump) {
+        // Align to kAlign to find each header
+        usize aligned = (off + (usize)(kAlign - 1)) & ~(usize)(kAlign - 1);
+        if (aligned + hdr_sz > c->bump) break;
+        rc_block_hdr_s *hdr = (rc_block_hdr_s *)(base + aligned);
+        usize step = hdr_sz + hdr->size;
+        if (step == 0) break;  // guard against corrupt zero-size
+        if (hdr->flags == RC_FLAG_LIVE && hdr->seq >= tag) reclaim_free_block(c, hdr);
+        off = aligned + step;
     }
+    c->frame_seq = tag > 1 ? tag - 1 : 0;
+}
 
-    // Register in skip list (MTIS Tier 1)
-    uint16_t page_idx = nodepool_alloc_page_node(s);
-    if (page_idx == PAGE_NODE_NULL) {
-        munmap(new_page, SYS0_PAGE_SIZE);
-        return NULL;
+static void reclaim_ctrl_shutdown(sc_ctrl_base_s *base) {
+    if (!base || !base->backing) return;
+    munmap(base->backing->base, base->backing->size);
+    base->backing->base = NULL;
+}
+
+// ── Allocator interface instance ──────────────────────────────────────────
+const sc_allocator_i Allocator = {
+    .acquire = allocator_acquire,
+    .release = allocator_release,
+    .create_bump = allocator_create_bump,
+    .create_reclaim = allocator_create_reclaim,
+    .create_custom = allocator_create_custom,
+    .register_ctrl = allocator_register_ctrl,
+    .alloc = slb0_alloc,
+    .free = slb0_free,
+    .realloc = slb0_realloc,
+    .is_ready = allocator_is_ready,
+};
+
+// ── Kernel controller (MTIS) helpers ─────────────────────────────────────
+// NodePool layout:
+//   [0 .. sizeof(knl_nodepool_hdr_s))          — header (40 bytes)
+//   [page_alloc_off .. )                        — knl_page_node_s array (grows up)
+//   [.. btree_alloc_off]                        — knl_node_s array (grows down)
+// Index 0 == KNL_PAGE_NULL / KNL_NODE_NULL (never issued).
+// page_nodes: 1-based index into the page array.
+// btree_nodes: top-relative index N → top - N*NODE_SIZE (stable across mremap).
+
+static knl_page_node_s *knl_page_at(sc_kernel_ctrl_s *c, uint16_t idx) {
+    if (idx == KNL_PAGE_NULL) return NULL;
+    knl_page_node_s *base =
+        (knl_page_node_s *)((uint8_t *)c->nodepool + sizeof(knl_nodepool_hdr_s));
+    return &base[idx - 1];
+}
+
+static knl_node_s *knl_node_at(sc_kernel_ctrl_s *c, uint16_t idx) {
+    if (idx == KNL_NODE_NULL) return NULL;
+    // btree nodes occupy the top of the nodepool region, growing downward.
+    // Formula: top - idx*NODE_SIZE is stable across mremap+memmove.
+    uint8_t *top = (uint8_t *)c->nodepool + c->nodepool->capacity;
+    return (knl_node_s *)(top - (usize)idx * sizeof(knl_node_s));
+}
+
+static uint16_t knl_page_index(sc_kernel_ctrl_s *c, knl_page_node_s *pn) {
+    knl_page_node_s *base =
+        (knl_page_node_s *)((uint8_t *)c->nodepool + sizeof(knl_nodepool_hdr_s));
+    return (uint16_t)(pn - base) + 1u;
+}
+
+static uint16_t knl_btree_node_index(sc_kernel_ctrl_s *c, knl_node_s *n) {
+    uint8_t *top = (uint8_t *)c->nodepool + c->nodepool->capacity;
+    usize off = (usize)(top - (uint8_t *)n);
+    return (uint16_t)(off / sizeof(knl_node_s));
+}
+
+// Grow nodepool by 2× via mremap; memmove btree region to new top.
+// After growth, existing top-relative indices remain valid without reindexing.
+static bool knl_nodepool_grow(sc_kernel_ctrl_s *c) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    usize old_cap = np->capacity;
+    usize new_cap = old_cap * 2;
+
+    void *new_base = mremap((void *)np, old_cap, new_cap, MREMAP_MAYMOVE);
+    if (new_base == MAP_FAILED) return false;
+
+    c->nodepool = (knl_nodepool_hdr_s *)new_base;
+    np = c->nodepool;
+    np->capacity = new_cap;
+
+    // Move btree region to the new top so top-relative indices still resolve correctly.
+    usize bt_used = old_cap - np->btree_alloc_off;
+    if (bt_used > 0) {
+        void *old_bt = (uint8_t *)new_base + np->btree_alloc_off;
+        void *new_bt = (uint8_t *)new_base + (new_cap - bt_used);
+        memmove(new_bt, old_bt, bt_used);
     }
+    np->btree_alloc_off = new_cap - bt_used;
+    return true;
+}
 
-    page_node *pn = nodepool_get_page_node(s, page_idx);
-    if (pn == NULL) {
-        munmap(new_page, SYS0_PAGE_SIZE);
-        return NULL;
+// Allocate a new page_node slot from the nodepool (grows up).
+static knl_page_node_s *knl_page_alloc(sc_kernel_ctrl_s *c) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    usize next = np->page_alloc_off + sizeof(knl_page_node_s);
+    if (next >= np->btree_alloc_off) {
+        if (!knl_nodepool_grow(c)) return NULL;
+        np = c->nodepool;
+        next = np->page_alloc_off + sizeof(knl_page_node_s);
     }
-
-    pn->page_base = (addr)new_page;
-    pn->btree_root = NODE_NULL;
-    pn->block_count = 0;
-    pn->bump_offset = 0;
-    pn->alloc_count = 0;
-    for (int i = 0; i < SKIP_LIST_MAX_LEVEL; i++) {
-        pn->forward[i] = PAGE_NODE_NULL;
-    }
-
-    skiplist_insert(s, (addr)new_page, page_idx);
-
-    // Update scope page tracking
-    if (s->first_page_off == 0) {
-        s->first_page_off = pn->page_base;
-    }
-    s->current_page_off = pn->page_base;
-    s->page_count++;
-
+    knl_page_node_s *pn = (knl_page_node_s *)((uint8_t *)np + np->page_alloc_off);
+    memset(pn, 0, sizeof(knl_page_node_s));
+    np->page_alloc_off = next;
     return pn;
 }
 
-/**
- * Check whether a frame handle belongs to the given scope.
- *
- * @param s Scope to check
- * @param f Frame handle to validate
- * @return true if frame is in scope's frame stack, false otherwise
- */
-static bool scope_owns_frame(scope s, frame f) {
-    if (s == NULL || !s->frame_active) {
-        return false;
+// Allocate a new btree_node slot (grows down from top); check recycled list first.
+static knl_node_s *knl_btree_alloc(sc_kernel_ctrl_s *c) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    if (np->btree_free_head != KNL_NODE_NULL) {
+        uint16_t idx = np->btree_free_head;
+        knl_node_s *n = knl_node_at(c, idx);
+        np->btree_free_head = n->left_idx;  // free list uses left_idx as next
+        memset(n, 0, sizeof(knl_node_s));
+        return n;
     }
-    // Packed handle: upper 16 bits = scope_id, lower 16 bits = frame_counter
-    uint16_t sid = (uint16_t)((uintptr_t)f >> 16);
-    uint16_t fid = (uint16_t)((uintptr_t)f & 0xFFFF);
-    return (sid == (uint16_t)s->scope_id) && (fid == s->active_frame.frame_id);
-}
-#endif
-
-#if 1  // Region: Frame Operations (v0.2.1)
-/**
- * Begin a new frame for bulk deallocation.
- * Allocates initial 4KB chunk from free space, uses bump allocation within chunk.
- * Chains additional chunks if frame grows beyond 4KB.
- *
- * @return Opaque frame handle, NULL if max depth exceeded or out of memory
- */
-static frame frame_begin_impl(void) {
-    scope s = (scope)memory_get_current_scope();  // R7: current scope
-    if (s == NULL) {
-        return NULL;
+    usize next = np->btree_alloc_off - sizeof(knl_node_s);
+    if (next <= np->page_alloc_off) {
+        if (!knl_nodepool_grow(c)) return NULL;
+        np = c->nodepool;
+        next = np->btree_alloc_off - sizeof(knl_node_s);
     }
-
-    // Enforce single active frame per scope
-    if (s->frame_active) {
-        return NULL;
-    }
-
-    // Find 4KB free block using skip list + B-tree
-    uint16_t chunk_idx = NODE_NULL;
-    uint16_t page_idx = PAGE_NODE_NULL;
-
-    // Try to find free block via skip list search
-    if (skiplist_find_for_size(s, FRAME_CHUNK_SIZE, &page_idx) == OK) {
-        if (btree_page_find_free(s, page_idx, FRAME_CHUNK_SIZE, &chunk_idx) != OK) {
-            chunk_idx = NODE_NULL;
-        }
-    }
-
-    // If no free block found, allocate new page
-    if (chunk_idx == NODE_NULL) {
-        page_node *pn = scope_alloc_tracked_page(s);
-        if (pn == NULL) {
-            return NULL;  // Out of memory
-        }
-
-        // scope_alloc_tracked_page registers in skip list; resolve page_idx directly
-        if (skiplist_find_containing(s, pn->page_base, &page_idx) != OK) {
-            return NULL;
-        }
-
-        // Bump allocate frame chunk from new page
-        addr chunk_addr = pn->page_base + pn->bump_offset;
-        if (pn->bump_offset + FRAME_CHUNK_SIZE > SYS0_PAGE_SIZE) {
-            return NULL;
-        }
-        pn->bump_offset += FRAME_CHUNK_SIZE;
-
-        // Insert node into B-tree to track this frame chunk
-        if (btree_page_insert(s, page_idx, chunk_addr, FRAME_CHUNK_SIZE, &chunk_idx) != OK) {
-            return NULL;
-        }
-    }
-
-    // Initialize frame chunk node
-    sc_node *frame_node = nodepool_get_btree_node(s, chunk_idx);
-    if (frame_node == NULL) {
-        return NULL;
-    }
-
-    frame_node->info &= ~NODE_FREE_FLAG;
-    frame_node->info |= FRAME_NODE_FLAG;
-    frame_node->length = FRAME_CHUNK_SIZE;
-    frame_node->frame_data.frame_offset = 0;
-    frame_node->frame_data.next_chunk_idx = NODE_NULL;
-    ++s->frame_counter;
-    frame_node->frame_data.frame_id = s->frame_counter;
-
-    // Update scope state
-    s->current_frame_idx = chunk_idx;
-    s->current_chunk_idx = chunk_idx;
-
-    // Record active frame
-    s->active_frame.frame_id = s->frame_counter;
-    s->active_frame.head_chunk_idx = chunk_idx;
-    s->active_frame.large_allocs_head = NODE_NULL;
-    s->active_frame.total_allocated = 0;
-    s->frame_active = true;
-
-    // Packed handle: upper 16 bits = scope_id, lower 16 bits = frame_counter
-    return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) | (uintptr_t)s->frame_counter);
+    np->btree_alloc_off = next;
+    knl_node_s *n = (knl_node_s *)((uint8_t *)np + next);
+    memset(n, 0, sizeof(knl_node_s));
+    return n;
 }
 
-/**
- * Allocate from current frame using bump allocation within chunks.
- * Chains new 4KB chunk if current chunk is full.
- *
- * @param scope_ptr Scope pointer (SLB0)
- * @param size Aligned size to allocate
- * @return Pointer to allocated memory, NULL if out of memory
- */
-static object alloc_from_frame(scope scope_ptr, usize size) {
-    if (scope_ptr == NULL || scope_ptr->current_chunk_idx == NODE_NULL) {
-        return NULL;
-    }
-
-    // Reject allocations larger than chunk size (would corrupt memory)
-    // Fall back to normal allocation for large requests
-    if (size > FRAME_CHUNK_SIZE) {
-        return NULL;  // Caller should use normal Allocator.alloc()
-    }
-
-    // Get current chunk
-    sc_node *chunk = nodepool_get_btree_node(scope_ptr, scope_ptr->current_chunk_idx);
-    if (chunk == NULL) {
-        return NULL;
-    }
-
-    // Fast path: fits in current chunk
-    if (chunk->frame_data.frame_offset + size <= FRAME_CHUNK_SIZE) {
-        addr ptr = chunk->start + chunk->frame_data.frame_offset;
-        chunk->frame_data.frame_offset += size;
-        scope_ptr->active_frame.total_allocated += size;
-        return (object)ptr;
-    }
-
-    // Slow path: need new chunk
-    uint16_t new_chunk_idx = NODE_NULL;
-    uint16_t page_idx = PAGE_NODE_NULL;
-
-    // Find free block for new chunk
-    if (skiplist_find_for_size(scope_ptr, FRAME_CHUNK_SIZE, &page_idx) == OK) {
-        if (btree_page_find_free(scope_ptr, page_idx, FRAME_CHUNK_SIZE, &new_chunk_idx) != OK) {
-            new_chunk_idx = NODE_NULL;
-        }
-    }
-
-    // Allocate new page if no free block
-    if (new_chunk_idx == NODE_NULL) {
-        page_node *new_page = scope_alloc_tracked_page(scope_ptr);
-        if (new_page == NULL) {
-            return NULL;  // Out of memory
-        }
-
-        if (skiplist_find_containing(scope_ptr, new_page->page_base, &page_idx) != OK) {
-            return NULL;
-        }
-
-        // Bump allocate chunk from new page
-        addr chunk_addr = new_page->page_base + new_page->bump_offset;
-        if (new_page->bump_offset + FRAME_CHUNK_SIZE > SYS0_PAGE_SIZE) {
-            return NULL;  // Page doesn't have enough space
-        }
-        new_page->bump_offset += FRAME_CHUNK_SIZE;
-
-        // Insert node to track this chunk
-        if (btree_page_insert(scope_ptr, page_idx, chunk_addr, FRAME_CHUNK_SIZE, &new_chunk_idx) !=
-            OK) {
-            return NULL;
-        }
-    }
-
-    // Initialize new chunk
-    sc_node *new_chunk = nodepool_get_btree_node(scope_ptr, new_chunk_idx);
-    if (new_chunk == NULL) {
-        return NULL;
-    }
-
-    new_chunk->info &= ~NODE_FREE_FLAG;
-    new_chunk->info |= FRAME_NODE_FLAG;
-    new_chunk->length = FRAME_CHUNK_SIZE;
-    new_chunk->frame_data.frame_offset = size;  // First allocation
-    new_chunk->frame_data.next_chunk_idx = NODE_NULL;
-    new_chunk->frame_data.frame_id = chunk->frame_data.frame_id;  // Same frame
-
-    // Chain to previous chunk
-    chunk->frame_data.next_chunk_idx = new_chunk_idx;
-    scope_ptr->current_chunk_idx = new_chunk_idx;
-
-    // Allocate from new chunk
-    scope_ptr->active_frame.total_allocated += size;
-    return (object)new_chunk->start;
+// Return a btree_node to the recycled free list.
+static void knl_btree_free_node(sc_kernel_ctrl_s *c, uint16_t idx) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    knl_node_s *n = knl_node_at(c, idx);
+    uint16_t next = np->btree_free_head;
+    memset(n, 0, sizeof(knl_node_s));
+    n->left_idx = next;
+    np->btree_free_head = idx;
 }
 
-/**
- * Register a large allocation (>4KB) with the current frame for cleanup.
- * Creates a tracking entry that will be freed when frame_end() is called.
- *
- * @param scope_ptr Current scope (SLB0)
- * @param alloc_addr Address of the large allocation
- * @param alloc_size Size of the large allocation
- * @return OK on success, ERR if not in frame context or out of nodes
- */
-static int register_large_alloc_with_frame(scope scope_ptr, addr alloc_addr, usize alloc_size) {
-    if (scope_ptr == NULL || !scope_ptr->frame_active) {
-        return ERR;  // Not in frame context
+// ── Skip-list helpers (4-level, P=0.5) ──────────────────────────────────
+
+static int knl_skip_random_level(void) {
+    int level = 0;
+    static unsigned int seed = 0x12345678;
+    seed = seed * 1103515245 + 12345;
+    unsigned int r = seed;
+    while ((r & 1) && level < KNL_SKIP_LEVELS - 1) {
+        level++;
+        r >>= 1;
     }
-
-    // Find the B-tree node that tracks this allocation
-    uint16_t page_idx = PAGE_NODE_NULL;
-    if (skiplist_find_containing(scope_ptr, alloc_addr, &page_idx) != OK) {
-        return ERR;  // Can't find page
-    }
-
-    // Search for the node in the page's B-tree
-    node_idx alloc_node_idx = NODE_NULL;
-    if (btree_page_search(scope_ptr, page_idx, alloc_addr, &alloc_node_idx) != OK) {
-        return ERR;  // Can't find allocation node
-    }
-
-    sc_node *alloc_node = nodepool_get_btree_node(scope_ptr, alloc_node_idx);
-    if (alloc_node == NULL) {
-        return ERR;
-    }
-
-    // Mark as frame-tracked large allocation
-    alloc_node->info |= FRAME_LARGE_FLAG;
-
-    // Link into frame's large allocation list (LIFO)
-    alloc_node->large_alloc_data.next_large_alloc = scope_ptr->active_frame.large_allocs_head;
-    scope_ptr->active_frame.large_allocs_head = alloc_node_idx;
-
-    // Update total allocated
-    scope_ptr->active_frame.total_allocated += alloc_size;
-
-    return OK;
+    return level;
 }
 
-/**
- * End current frame, marking all chunks as FREE and coalescing.
- * Restores parent frame context if nested.
- *
- * @param f Frame handle from frame_begin()
- * @return OK on success, ERR if invalid frame or not in frame context
- */
-static integer frame_end_impl(frame f) {
-    scope s = (scope)memory_get_current_scope();  // R7: current scope
-    if (s == NULL || !s->frame_active) {
-        return ERR;
+static uint16_t knl_skip_find_for_size(sc_kernel_ctrl_s *c, usize need) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    uint16_t cur = np->skip_head;
+    while (cur != KNL_PAGE_NULL) {
+        knl_page_node_s *pn = knl_page_at(c, cur);
+        // Check 1: best-fit free block in B-tree
+        if (knl_btree_find_free(c, cur, need) != KNL_NODE_NULL) return cur;
+        // Check 2: remaining bump space
+        if ((usize)(KNL_PAGE_SIZE - pn->bump_offset) >= need) return cur;
+        cur = pn->forward[0];
     }
-    if (!scope_owns_frame(s, f)) {
-        return ERR;  // Stale or wrong-scope handle
-    }
-
-    // Step 1: Free large allocations (>4KB, B-tree allocated)
-    uint16_t large_idx = s->active_frame.large_allocs_head;
-    while (large_idx != NODE_NULL) {
-        sc_node *large_node = nodepool_get_btree_node(s, large_idx);
-        if (large_node == NULL) {
-            break;
-        }
-
-        uint16_t next_large = large_node->large_alloc_data.next_large_alloc;
-
-        // Mark as free and coalesce
-        large_node->info |= NODE_FREE_FLAG;
-        large_node->info &= ~FRAME_LARGE_FLAG;
-
-        // Find page for coalescing
-        uint16_t page_idx = PAGE_NODE_NULL;
-        if (skiplist_find_containing(s, large_node->start, &page_idx) == OK) {
-            btree_page_coalesce(s, page_idx, large_idx);
-        }
-
-        large_idx = next_large;
-    }
-
-    // Step 2: Free frame chunks (4KB, bump allocated)
-    uint16_t chunk_idx = s->active_frame.head_chunk_idx;
-
-    // Walk chunk chain and mark all as FREE
-    while (chunk_idx != NODE_NULL) {
-        sc_node *chunk = nodepool_get_btree_node(s, chunk_idx);
-        if (chunk == NULL) {
-            break;
-        }
-
-        uint16_t next = chunk->frame_data.next_chunk_idx;
-
-        // Mark chunk as FREE
-        chunk->info |= NODE_FREE_FLAG;
-        chunk->info &= ~FRAME_NODE_FLAG;
-        chunk->frame_data.frame_offset = 0;
-        chunk->frame_data.next_chunk_idx = NODE_NULL;
-        chunk->frame_data.frame_id = 0;
-
-        // Find page containing this chunk for coalescing
-        uint16_t page_idx = PAGE_NODE_NULL;
-        if (skiplist_find_containing(s, chunk->start, &page_idx) == OK) {
-            btree_page_coalesce(s, page_idx, chunk_idx);
-        }
-
-        chunk_idx = next;
-    }
-
-    // Clear frame state (no nesting: depth returns to 0)
-    s->frame_active = false;
-    s->current_frame_idx = NODE_NULL;
-    s->current_chunk_idx = NODE_NULL;
-
-    return OK;
+    return KNL_PAGE_NULL;
 }
 
-/**
- * Get current frame nesting depth.
- *
- * @return Frame depth (0 = no active frames, 1+ = nested frames)
- */
-static usize frame_depth_impl(void) {
-    scope s = (scope)memory_get_current_scope();  // R7: current scope
-    if (s == NULL) {
-        return 0;
+static uint16_t knl_skip_find_containing(sc_kernel_ctrl_s *c, addr address) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    if (np->skip_head == KNL_PAGE_NULL) return KNL_PAGE_NULL;
+    uint16_t cur = np->skip_head;
+    // Multi-level descent (does NOT reset cur between levels)
+    for (int i = KNL_SKIP_LEVELS - 1; i >= 0; i--) {
+        while (cur != KNL_PAGE_NULL) {
+            knl_page_node_s *cn = knl_page_at(c, cur);
+            if (!cn) return KNL_PAGE_NULL;
+            if (address >= cn->page_base && address < cn->page_base + KNL_PAGE_SIZE) return cur;
+            uint16_t next = cn->forward[i];
+            if (next == KNL_PAGE_NULL) break;
+            knl_page_node_s *nn = knl_page_at(c, next);
+            if (!nn || nn->page_base > address) break;
+            cur = next;
+        }
     }
-    return s->frame_active ? 1 : 0;
+    return KNL_PAGE_NULL;
 }
 
-/**
- * Get total bytes allocated in a frame.
- *
- * @param f Frame handle
- * @return Total allocated bytes, 0 if invalid frame
- */
-static usize frame_allocated_impl(frame f) {
-    if (f == NULL) {
-        return 0;
-    }
-    // Self-describing handle: decode scope_id from upper 16 bits
-    uint16_t sid = (uint16_t)((uintptr_t)f >> 16);
-    uint16_t fid = (uint16_t)((uintptr_t)f & 0xFFFF);
-    scope s = get_scope_table_entry(sid);
-    if (s == NULL || !s->frame_active || s->active_frame.frame_id != fid) {
-        return 0;  // Stale or invalid handle
-    }
-    return s->active_frame.total_allocated;
-}
+static void knl_skip_insert(sc_kernel_ctrl_s *c, knl_page_node_s *pn) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    uint16_t pidx = knl_page_index(c, pn);
+    int level = knl_skip_random_level();
 
-/**
- * Begin a frame on an explicitly named scope (does NOT change R7).
- *
- * @param scope_ptr Target scope for the frame
- * @return Opaque frame handle, NULL on failure
- */
-static frame frame_begin_in_impl(scope s) {
-    if (s == NULL) {
-        return NULL;
-    }
-
-    // Enforce single active frame per scope
-    if (s->frame_active) {
-        return NULL;
-    }
-
-    // Find 4KB free block using skip list + B-tree
-    uint16_t chunk_idx = NODE_NULL;
-    uint16_t page_idx = PAGE_NODE_NULL;
-
-    if (skiplist_find_for_size(s, FRAME_CHUNK_SIZE, &page_idx) == OK) {
-        if (btree_page_find_free(s, page_idx, FRAME_CHUNK_SIZE, &chunk_idx) != OK) {
-            chunk_idx = NODE_NULL;
-        }
-    }
-
-    // If no free block found, allocate new tracked page
-    if (chunk_idx == NODE_NULL) {
-        page_node *pn = scope_alloc_tracked_page(s);
-        if (pn == NULL) {
-            return NULL;
-        }
-
-        if (skiplist_find_containing(s, pn->page_base, &page_idx) != OK) {
-            return NULL;
-        }
-
-        addr chunk_addr = pn->page_base + pn->bump_offset;
-        if (pn->bump_offset + FRAME_CHUNK_SIZE > SYS0_PAGE_SIZE) {
-            return NULL;
-        }
-        pn->bump_offset += FRAME_CHUNK_SIZE;
-
-        if (btree_page_insert(s, page_idx, chunk_addr, FRAME_CHUNK_SIZE, &chunk_idx) != OK) {
-            return NULL;
-        }
-    }
-
-    // Initialize frame chunk node
-    sc_node *frame_node = nodepool_get_btree_node(s, chunk_idx);
-    if (frame_node == NULL) {
-        return NULL;
-    }
-
-    frame_node->info &= ~NODE_FREE_FLAG;
-    frame_node->info |= FRAME_NODE_FLAG;
-    frame_node->length = FRAME_CHUNK_SIZE;
-    frame_node->frame_data.frame_offset = 0;
-    frame_node->frame_data.next_chunk_idx = NODE_NULL;
-    ++s->frame_counter;
-    frame_node->frame_data.frame_id = s->frame_counter;
-
-    // Update scope state
-    s->current_frame_idx = chunk_idx;
-    s->current_chunk_idx = chunk_idx;
-
-    // Record active frame
-    s->active_frame.frame_id = s->frame_counter;
-    s->active_frame.head_chunk_idx = chunk_idx;
-    s->active_frame.large_allocs_head = NODE_NULL;
-    s->active_frame.total_allocated = 0;
-    s->frame_active = true;
-
-    // R7 is NOT changed by this function
-    // Packed handle: upper 16 bits = scope_id, lower 16 bits = frame_counter
-    return (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) | (uintptr_t)s->frame_counter);
-}
-
-/**
- * End a frame on an explicitly named scope (does NOT change R7).
- * Returns ERR if the frame handle does not belong to the given scope.
- *
- * @param scope_ptr Target scope
- * @param f Frame handle from frame_begin_in()
- * @return OK on success, ERR if invalid scope/frame
- */
-static integer frame_end_in_impl(scope s, frame f) {
-    if (s == NULL || !s->frame_active) {
-        return ERR;
-    }
-
-    // Validate that this frame belongs to the specified scope
-    if (!scope_owns_frame(s, f)) {
-        return ERR;
-    }
-
-    // Step 1: Free large allocations
-    uint16_t large_idx = s->active_frame.large_allocs_head;
-    while (large_idx != NODE_NULL) {
-        sc_node *large_node = nodepool_get_btree_node(s, large_idx);
-        if (large_node == NULL) {
-            break;
-        }
-
-        uint16_t next_large = large_node->large_alloc_data.next_large_alloc;
-        large_node->info |= NODE_FREE_FLAG;
-        large_node->info &= ~FRAME_LARGE_FLAG;
-
-        uint16_t page_idx = PAGE_NODE_NULL;
-        if (skiplist_find_containing(s, large_node->start, &page_idx) == OK) {
-            btree_page_coalesce(s, page_idx, large_idx);
-        }
-
-        large_idx = next_large;
-    }
-
-    // Step 2: Free frame chunks
-    uint16_t chunk_idx = s->active_frame.head_chunk_idx;
-    while (chunk_idx != NODE_NULL) {
-        sc_node *chunk = nodepool_get_btree_node(s, chunk_idx);
-        if (chunk == NULL) {
-            break;
-        }
-
-        uint16_t next = chunk->frame_data.next_chunk_idx;
-        chunk->info |= NODE_FREE_FLAG;
-        chunk->info &= ~FRAME_NODE_FLAG;
-        chunk->frame_data.frame_offset = 0;
-        chunk->frame_data.next_chunk_idx = NODE_NULL;
-        chunk->frame_data.frame_id = 0;
-
-        uint16_t page_idx = PAGE_NODE_NULL;
-        if (skiplist_find_containing(s, chunk->start, &page_idx) == OK) {
-            btree_page_coalesce(s, page_idx, chunk_idx);
-        }
-
-        chunk_idx = next;
-    }
-
-    // Clear frame state (no nesting: depth returns to 0)
-    s->frame_active = false;
-    s->current_frame_idx = NODE_NULL;
-    s->current_chunk_idx = NODE_NULL;
-
-    // R7 is NOT changed by this function
-    return OK;
-}
-
-/**
- * Get frame depth of an explicitly named scope (reads scope directly, no R7).
- *
- * @param scope_ptr Target scope
- * @return Frame depth (0 = no active frames)
- */
-static usize frame_depth_of_impl(scope s) {
-    if (s == NULL) {
-        return 0;
-    }
-    return s->frame_active ? 1 : 0;
-}
-#endif
-
-#if 1  // Region: Arena Allocation (v0.2.2)
-/**
- * Allocate from arena using bump allocation.
- * Pages are allocated and tracked via scope_alloc_tracked_page (MTIS-registered).
- *
- * @param arena Arena scope
- * @param size Requested size in bytes
- * @return Pointer to allocated memory or NULL
- */
-static object arena_alloc(scope arena, usize size) {
-    if (arena == NULL || size == 0) {
-        return NULL;
-    }
-
-    // Align size to 16-byte boundary
-    usize aligned_size = (size + (kAlign - 1)) & ~(kAlign - 1);
-
-    // If in frame context and fits in chunk, use chunk-based frame allocation
-    if (arena->frame_active && aligned_size <= FRAME_CHUNK_SIZE) {
-        object ptr = alloc_from_frame(arena, aligned_size);
-        if (ptr != NULL) {
-            return ptr;
-        }
-    }
-
-    // Track byte count in frame even for bump-allocated overflow
-    if (arena->frame_active) {
-        arena->active_frame.total_allocated += aligned_size;
-    }
-
-    // Try to bump-allocate from the current page
-    if (arena->current_page_off != 0) {
-        uint16_t page_idx = PAGE_NODE_NULL;
-        if (skiplist_find_containing(arena, arena->current_page_off, &page_idx) == OK) {
-            page_node *pn = nodepool_get_page_node(arena, page_idx);
-            if (pn != NULL) {
-                usize available = SYS0_PAGE_SIZE - pn->bump_offset;
-                if (available >= aligned_size) {
-                    object ptr = (object)(pn->page_base + pn->bump_offset);
-                    pn->bump_offset += (uint16_t)aligned_size;
-                    pn->alloc_count++;
-                    return ptr;
-                }
-            }
-        }
-    }
-
-    // Current page full or none exists — allocate a new tracked page
-    page_node *pn = scope_alloc_tracked_page(arena);
-    if (pn == NULL) {
-        return NULL;
-    }
-
-    object ptr = (object)(pn->page_base + pn->bump_offset);
-    pn->bump_offset += (uint16_t)aligned_size;
-    pn->alloc_count++;
-    return ptr;
-}
-
-/**
- * Dispose pointer in arena (no-op for now - simple arenas don't reclaim)
- *
- * @param arena Arena scope
- * @param ptr Pointer to dispose
- */
-static void arena_dispose_ptr(scope arena, object ptr) {
-    // No-op: Simple arenas don't support individual deallocation
-    // Memory is freed when entire arena is disposed
-    (void)arena;
-    (void)ptr;
-}
-#endif
-
-#if 1  // Region: Arena Lifecycle (v0.2.2)
-/**
- * Create a new arena with given name and policy.
- * Finds free slot in scope_table[2-15], creates NodePool, returns scope.
- *
- * @param name Arena name (truncated to 15 chars)
- * @param policy Allocation policy (POOLING, RECLAIMING, GROWABLE)
- * @return scope pointer or NULL on exhaustion
- */
-static scope arena_create_impl(const char *name, sbyte policy) {
-    scope result = NULL;
-
-    // Find free slot in scope_table[2-15]
-    for (usize i = 2; i < 16; i++) {
-        scope s = get_scope_table_entry(i);
-        if (s == NULL || s->nodepool_base == ADDR_EMPTY) {
-            // Found free slot
-            if (s == NULL) {
-                // Slot not allocated, allocate from SYS0
-                s = (scope)sys0_alloc(sizeof(sc_scope));
-                if (s == NULL) {
-                    goto exit;
-                }
-                // Write to scope_table
-                scope_table[i] = *s;
-                s = &scope_table[i];
-            }
-
-            // Initialize scope structure
-            memset(s, 0, sizeof(sc_scope));
-            s->scope_id = (uint8_t)i;
-            s->policy = policy;
-            s->flags = 0;  // User arenas are not protected/pinned
-
-            // Copy name (truncate to 15 chars + null terminator)
-            if (name != NULL) {
-                strncpy(s->name, name, 15);
-                s->name[15] = '\0';
-            } else {
-                s->name[0] = '\0';
-            }
-
-            // Initialize NodePool for this arena
-            if (nodepool_init(s) != OK) {
-                // NodePool creation failed
-                memset(s, 0, sizeof(sc_scope));
-                s->nodepool_base = ADDR_EMPTY;
-                goto exit;
-            }
-
-            result = s;
-            goto exit;
-        }
-    }
-
-    // No free slots found (exhaustion)
-exit:
-    // Auto-activate: new arena becomes current scope via prev chain (v0.2.3)
-    if (result != NULL) {
-        result->prev = (scope)registers_get(REG_CURRENT_SCOPE);
-        registers_set(REG_CURRENT_SCOPE, (addr)result);
-    }
-    return result;
-}
-
-/**
- * Dispose arena and free its resources.
- * Auto-unwinds any active frames, restores R7 if arena is current,
- * shuts down NodePool, unmaps all pages, and clears scope_table slot.
- *
- * @param s Scope pointer to dispose
- */
-static void arena_dispose_impl(scope s) {
-    if (s == NULL) {
+    if (np->skip_head == KNL_PAGE_NULL) {
+        for (int i = 0; i < KNL_SKIP_LEVELS; i++) pn->forward[i] = KNL_PAGE_NULL;
+        np->skip_head = pidx;
+        np->page_count++;
         return;
     }
 
-    // Validate scope is user arena (2-15)
-    uint8_t id = s->scope_id;
-    if (id < 2 || id > 15) {
-        return;  // Cannot dispose SYS0/SLB0 or invalid scope
-    }
+    uint16_t update[KNL_SKIP_LEVELS];
+    for (int i = 0; i < KNL_SKIP_LEVELS; i++) update[i] = KNL_PAGE_NULL;
+    uint16_t cur = np->skip_head;
 
-    // Auto-unwind active frame if present (v0.2.3: single frame per scope)
-    if (s->frame_active) {
-        frame f = (frame)(uintptr_t)(((uintptr_t)s->scope_id << 16) |
-                                     (uintptr_t)s->active_frame.frame_id);
-        frame_end_in_impl(s, f);
-    }
-
-    // Restore R7 to prev only if this arena is currently active (v0.2.3)
-    if ((scope)registers_get(REG_CURRENT_SCOPE) == s) {
-        scope restore_to = s->prev ? s->prev : get_scope_table_entry(1);  // default SLB0
-        registers_set(REG_CURRENT_SCOPE, (addr)restore_to);
-    }
-
-    // Free all pages via skip list (NodePool remains valid until nodepool_shutdown)
-    nodepool_header *hdr = nodepool_get_header(s);
-    if (hdr != NULL) {
-        uint16_t page_idx = hdr->skip_list_head;
-        while (page_idx != PAGE_NODE_NULL) {
-            page_node *pn = nodepool_get_page_node(s, page_idx);
-            if (pn == NULL) break;
-            uint16_t next = pn->forward[0];
-            munmap((void *)pn->page_base, SYS0_PAGE_SIZE);
-            page_idx = next;
+    for (int i = KNL_SKIP_LEVELS - 1; i >= 0; i--) {
+        if (i < KNL_SKIP_LEVELS - 1)
+            cur = (update[i + 1] != KNL_PAGE_NULL) ? update[i + 1] : np->skip_head;
+        while (cur != KNL_PAGE_NULL) {
+            knl_page_node_s *cn = knl_page_at(c, cur);
+            if (!cn || cn->page_base >= pn->page_base) break;
+            uint16_t next = cn->forward[i];
+            if (next == KNL_PAGE_NULL) {
+                update[i] = cur;
+                break;
+            }
+            knl_page_node_s *nn = knl_page_at(c, next);
+            if (!nn || nn->page_base >= pn->page_base) {
+                update[i] = cur;
+                break;
+            }
+            cur = next;
         }
     }
 
-    // Shutdown NodePool
-    if (s->nodepool_base != ADDR_EMPTY) {
-        nodepool_shutdown(s);
+    for (int i = 0; i <= level; i++) {
+        if (update[i] == KNL_PAGE_NULL) {
+            pn->forward[i] = np->skip_head;
+        } else {
+            knl_page_node_s *prev = knl_page_at(c, update[i]);
+            if (prev) {
+                pn->forward[i] = prev->forward[i];
+                prev->forward[i] = pidx;
+            }
+        }
     }
-
-    // Clear scope structure
-    memset(s, 0, sizeof(sc_scope));
-    s->nodepool_base = ADDR_EMPTY;
+    for (int i = level + 1; i < KNL_SKIP_LEVELS; i++) pn->forward[i] = KNL_PAGE_NULL;
+    if (update[0] == KNL_PAGE_NULL) np->skip_head = pidx;
+    np->page_count++;
 }
 
-/**
- * Find an existing arena by name.
- *
- * @param name Arena name to search for
- * @return scope pointer or NULL if not found
- */
-static scope arena_find_impl(const char *name) {
-    if (name == NULL || scope_table == NULL) {
+#if 0  // We are not removing pages from the skip list in this implementation, but this is how it
+       // would work if we did.
+static void knl_skip_remove(sc_kernel_ctrl_s *c, uint16_t pidx) {
+    knl_nodepool_hdr_s *np = c->nodepool;
+    knl_page_node_s *target = knl_page_at(c, pidx);
+    if (!target) return;
+
+    if (np->skip_head == pidx) {
+        np->skip_head = target->forward[0];
+        if (np->page_count > 0) np->page_count--;
+        return;
+    }
+
+    uint16_t update[KNL_SKIP_LEVELS];
+    for (int i = 0; i < KNL_SKIP_LEVELS; i++) update[i] = KNL_PAGE_NULL;
+    for (int i = KNL_SKIP_LEVELS - 1; i >= 0; i--) {
+        uint16_t cur = np->skip_head;
+        while (cur != KNL_PAGE_NULL && cur != pidx) {
+            knl_page_node_s *cn = knl_page_at(c, cur);
+            if (!cn) break;
+            if (cn->forward[i] == pidx) {
+                update[i] = cur;
+                break;
+            }
+            cur = cn->forward[i];
+        }
+    }
+    for (int i = 0; i < KNL_SKIP_LEVELS; i++) {
+        if (update[i] != KNL_PAGE_NULL) {
+            knl_page_node_s *prev = knl_page_at(c, update[i]);
+            if (prev && prev->forward[i] == pidx) prev->forward[i] = target->forward[i];
+        }
+    }
+    if (np->page_count > 0) np->page_count--;
+}
+#endif
+
+// ── B-tree helpers (BST ordered by start address) ─────────────────────────
+
+static uint16_t knl_btree_insert(sc_kernel_ctrl_s *c, uint16_t pidx, addr start, usize len) {
+    knl_node_s *n = knl_btree_alloc(c);
+    if (!n) return KNL_NODE_NULL;
+    // Re-fetch page after potential mremap in knl_btree_alloc
+    knl_page_node_s *pg = knl_page_at(c, pidx);
+    n->start = start;
+    n->length = (uint32_t)len;
+    n->left_idx = KNL_NODE_NULL;
+    n->right_idx = KNL_NODE_NULL;
+    n->info = 0;  // LIVE
+
+    uint16_t nidx = knl_btree_node_index(c, n);
+
+    if (pg->btree_root == KNL_NODE_NULL) {
+        pg->btree_root = nidx;
+    } else {
+        uint16_t cur = pg->btree_root;
+        while (1) {
+            knl_node_s *cn = knl_node_at(c, cur);
+            if (start < cn->start) {
+                if (cn->left_idx == KNL_NODE_NULL) {
+                    cn->left_idx = nidx;
+                    break;
+                }
+                cur = cn->left_idx;
+            } else {
+                if (cn->right_idx == KNL_NODE_NULL) {
+                    cn->right_idx = nidx;
+                    break;
+                }
+                cur = cn->right_idx;
+            }
+        }
+    }
+    pg->block_count++;
+    pg->alloc_count++;
+    return nidx;
+}
+
+// BST search by start address — O(log n).
+static uint16_t knl_btree_page_search(sc_kernel_ctrl_s *c, uint16_t pidx, addr start) {
+    knl_page_node_s *pg = knl_page_at(c, pidx);
+    if (!pg) return KNL_NODE_NULL;
+    uint16_t cur = pg->btree_root;
+    while (cur != KNL_NODE_NULL) {
+        knl_node_s *n = knl_node_at(c, cur);
+        if (start == n->start) return cur;
+        cur = (start < n->start) ? n->left_idx : n->right_idx;
+    }
+    return KNL_NODE_NULL;
+}
+
+// Recursive best-fit traversal — visits both subtrees to find smallest fitting block.
+static void knl_btree_find_best_recursive(sc_kernel_ctrl_s *c, uint16_t cur, usize need,
+                                          uint16_t *best, uint32_t *best_sz) {
+    if (cur == KNL_NODE_NULL) return;
+    knl_node_s *n = knl_node_at(c, cur);
+    if ((n->info & KNL_FREE_FLAG) && n->length >= (uint32_t)need) {
+        if (*best == KNL_NODE_NULL || n->length < *best_sz) {
+            *best = cur;
+            *best_sz = n->length;
+        }
+    }
+    knl_btree_find_best_recursive(c, n->left_idx, need, best, best_sz);
+    knl_btree_find_best_recursive(c, n->right_idx, need, best, best_sz);
+}
+
+// Find best-fit free block in page's B-tree — O(n tree nodes) recursive.
+static uint16_t knl_btree_find_free(sc_kernel_ctrl_s *c, uint16_t pidx, usize need) {
+    knl_page_node_s *pg = knl_page_at(c, pidx);
+    if (!pg || pg->btree_root == KNL_NODE_NULL) return KNL_NODE_NULL;
+    uint16_t best = KNL_NODE_NULL;
+    uint32_t best_sz = 0;
+    knl_btree_find_best_recursive(c, pg->btree_root, need, &best, &best_sz);
+    return best;
+}
+
+// BST helper: find leftmost (minimum) node in subtree.
+static uint16_t knl_btree_find_min(sc_kernel_ctrl_s *c, uint16_t idx) {
+    while (idx != KNL_NODE_NULL) {
+        knl_node_s *n = knl_node_at(c, idx);
+        if (n->left_idx == KNL_NODE_NULL) return idx;
+        idx = n->left_idx;
+    }
+    return KNL_NODE_NULL;
+}
+
+// BST helper: find rightmost (maximum) node in subtree.
+static uint16_t knl_btree_find_max(sc_kernel_ctrl_s *c, uint16_t idx) {
+    while (idx != KNL_NODE_NULL) {
+        knl_node_s *n = knl_node_at(c, idx);
+        if (n->right_idx == KNL_NODE_NULL) return idx;
+        idx = n->right_idx;
+    }
+    return KNL_NODE_NULL;
+}
+
+// BST in-order predecessor of target (largest node with start < target.start).
+static uint16_t knl_btree_find_predecessor(sc_kernel_ctrl_s *c, uint16_t root, uint16_t target) {
+    knl_node_s *t = knl_node_at(c, target);
+    if (!t) return KNL_NODE_NULL;
+    if (t->left_idx != KNL_NODE_NULL) return knl_btree_find_max(c, t->left_idx);
+    uint16_t pred = KNL_NODE_NULL;
+    uint16_t cur = root;
+    while (cur != KNL_NODE_NULL && cur != target) {
+        knl_node_s *n = knl_node_at(c, cur);
+        if (t->start > n->start) {
+            pred = cur;
+            cur = n->right_idx;
+        } else {
+            cur = n->left_idx;
+        }
+    }
+    return pred;
+}
+
+// BST in-order successor of target (smallest node with start > target.start).
+static uint16_t knl_btree_find_successor(sc_kernel_ctrl_s *c, uint16_t root, uint16_t target) {
+    knl_node_s *t = knl_node_at(c, target);
+    if (!t) return KNL_NODE_NULL;
+    if (t->right_idx != KNL_NODE_NULL) return knl_btree_find_min(c, t->right_idx);
+    uint16_t succ = KNL_NODE_NULL;
+    uint16_t cur = root;
+    while (cur != KNL_NODE_NULL && cur != target) {
+        knl_node_s *n = knl_node_at(c, cur);
+        if (t->start < n->start) {
+            succ = cur;
+            cur = n->left_idx;
+        } else {
+            cur = n->right_idx;
+        }
+    }
+    return succ;
+}
+
+// Recursive BST delete — returns new subtree root.
+static uint16_t knl_btree_delete_recursive(sc_kernel_ctrl_s *c, uint16_t cur, uint16_t del,
+                                           bool *deleted) {
+    if (cur == KNL_NODE_NULL) {
+        *deleted = false;
+        return KNL_NODE_NULL;
+    }
+    knl_node_s *cn = knl_node_at(c, cur);
+
+    if (cur == del) {
+        *deleted = true;
+        // Leaf
+        if (cn->left_idx == KNL_NODE_NULL && cn->right_idx == KNL_NODE_NULL) {
+            knl_btree_free_node(c, cur);
+            return KNL_NODE_NULL;
+        }
+        // Single child
+        if (cn->left_idx == KNL_NODE_NULL) {
+            uint16_t r = cn->right_idx;
+            knl_btree_free_node(c, cur);
+            return r;
+        }
+        if (cn->right_idx == KNL_NODE_NULL) {
+            uint16_t l = cn->left_idx;
+            knl_btree_free_node(c, cur);
+            return l;
+        }
+        // Two children: replace with in-order successor (min of right subtree)
+        uint16_t succ = knl_btree_find_min(c, cn->right_idx);
+        knl_node_s *sn = knl_node_at(c, succ);
+        cn->start = sn->start;
+        cn->length = sn->length;
+        cn->info = sn->info;
+        bool dummy;
+        cn->right_idx = knl_btree_delete_recursive(c, cn->right_idx, succ, &dummy);
+        return cur;
+    }
+
+    knl_node_s *del_n = knl_node_at(c, del);
+    if (!del_n) {
+        *deleted = false;
+        return cur;
+    }
+    if (del_n->start < cn->start)
+        cn->left_idx = knl_btree_delete_recursive(c, cn->left_idx, del, deleted);
+    else
+        cn->right_idx = knl_btree_delete_recursive(c, cn->right_idx, del, deleted);
+    return cur;
+}
+
+// Delete a btree_node from the page's BST — page block_count updated on success.
+static void knl_btree_delete(sc_kernel_ctrl_s *c, uint16_t pidx, uint16_t nidx) {
+    knl_page_node_s *pg = knl_page_at(c, pidx);
+    if (!pg) return;
+    bool deleted = false;
+    pg->btree_root = knl_btree_delete_recursive(c, pg->btree_root, nidx, &deleted);
+    if (deleted) pg->block_count--;
+}
+
+// Coalesce freed block with its BST predecessor and successor if they are adjacent and free.
+static void knl_btree_coalesce(sc_kernel_ctrl_s *c, uint16_t pidx, uint16_t nidx) {
+    knl_page_node_s *pg = knl_page_at(c, pidx);
+    if (!pg || pg->btree_root == KNL_NODE_NULL) return;
+    knl_node_s *freed = knl_node_at(c, nidx);
+    if (!freed || !(freed->info & KNL_FREE_FLAG)) return;
+
+    // Coalesce with predecessor (left address neighbor)
+    uint16_t pred = knl_btree_find_predecessor(c, pg->btree_root, nidx);
+    if (pred != KNL_NODE_NULL) {
+        knl_node_s *pn = knl_node_at(c, pred);
+        if ((pn->info & KNL_FREE_FLAG) && pn->start + pn->length == freed->start) {
+            pn->length += freed->length;
+            knl_btree_delete(c, pidx, nidx);
+            nidx = pred;
+            freed = pn;
+        }
+    }
+
+    // Coalesce with successor (right address neighbor)
+    uint16_t succ = knl_btree_find_successor(c, pg->btree_root, nidx);
+    if (succ != KNL_NODE_NULL) {
+        knl_node_s *sn = knl_node_at(c, succ);
+        if ((sn->info & KNL_FREE_FLAG) && freed->start + freed->length == sn->start) {
+            freed->length += sn->length;
+            knl_btree_delete(c, pidx, succ);
+        }
+    }
+}
+
+// ── Page lifecycle ─────────────────────────────────────────────────────────
+
+// Allocate a new KNL_PAGE_SIZE region from the 2 MB kernel arena and register it.
+static uint16_t knl_ensure_page(sc_kernel_ctrl_s *c, usize need) {
+    // First try existing pages via skip list
+    uint16_t pidx = knl_skip_find_for_size(c, need);
+    if (pidx != KNL_PAGE_NULL) return pidx;
+
+    // Allocate a new page from the 2 MB arena
+    usize aligned = (c->bump + KNL_PAGE_SIZE - 1) & ~(usize)(KNL_PAGE_SIZE - 1);
+    if (aligned + KNL_PAGE_SIZE > c->capacity) return KNL_PAGE_NULL;
+
+    addr page_base = (addr)c->base.backing->base + aligned;
+    c->bump = aligned + KNL_PAGE_SIZE;
+
+    knl_page_node_s *pn = knl_page_alloc(c);
+    if (!pn) return KNL_PAGE_NULL;
+    pn->page_base = page_base;
+    pn->btree_root = KNL_NODE_NULL;
+    pn->block_count = 0;
+    pn->alloc_count = 0;
+    pn->bump_offset = 0;
+    knl_skip_insert(c, pn);
+    return knl_page_index(c, pn);
+}
+
+// Bump-allocate within a page (tracked in B-tree as LIVE).
+static object knl_bump_from_page(sc_kernel_ctrl_s *c, uint16_t pidx, usize need) {
+    knl_page_node_s *pn = knl_page_at(c, pidx);
+    usize aligned = (pn->bump_offset + KNL_MIN_ALLOC - 1) & ~(usize)(KNL_MIN_ALLOC - 1);
+    if (aligned + need > KNL_PAGE_SIZE) return NULL;
+    addr ptr = pn->page_base + aligned;
+    pn->bump_offset = (uint16_t)(aligned + need);
+    knl_btree_insert(c, pidx, ptr, need);
+    return (object)(uintptr_t)ptr;
+}
+
+// ── Kernel alloc / free / realloc ─────────────────────────────────────────
+
+static object kernel_alloc(sc_kernel_ctrl_s *c, usize size) {
+    if (!c || size == 0) return NULL;
+    usize need = (size + KNL_MIN_ALLOC - 1) & ~(usize)(KNL_MIN_ALLOC - 1);
+    // For allocations larger than one page, use multi-page bump (no B-tree tracking per page)
+    if (need > KNL_PAGE_SIZE) {
+        usize aligned = (c->bump + KNL_PAGE_SIZE - 1) & ~(usize)(KNL_PAGE_SIZE - 1);
+        if (aligned + need > c->capacity) return NULL;
+        object ptr = (uint8_t *)c->base.backing->base + aligned;
+        c->bump = aligned + need;
+        return ptr;
+    }
+
+    // Try to reuse a free block from the skip list
+    uint16_t pidx = knl_skip_find_for_size(c, need);
+    if (pidx != KNL_PAGE_NULL) {
+        uint16_t nidx = knl_btree_find_free(c, pidx, need);
+        if (nidx != KNL_NODE_NULL) {
+            knl_node_s *n = knl_node_at(c, nidx);
+            addr ptr = n->start;
+            if (n->length > (uint32_t)need + KNL_MIN_ALLOC) {
+                // Split: shrink this node to the requested size; insert remainder as free.
+                addr rem_start = n->start + need;
+                usize rem_len = n->length - need;
+                n->length = (uint32_t)need;
+                n->info &= (uint16_t)~KNL_FREE_FLAG;
+                // knl_btree_insert may mremap — do NOT use n or pg pointers after this.
+                uint16_t rem_idx = knl_btree_insert(c, pidx, rem_start, rem_len);
+                if (rem_idx != KNL_NODE_NULL) {
+                    knl_node_at(c, rem_idx)->info |= KNL_FREE_FLAG;
+                    // insert added 1 to alloc_count; undo since remainder is free
+                    knl_page_node_s *pg = knl_page_at(c, pidx);
+                    if (pg->alloc_count > 0) pg->alloc_count--;
+                }
+            } else {
+                n->info &= (uint16_t)~KNL_FREE_FLAG;
+                knl_page_at(c, pidx)->alloc_count++;
+            }
+            return (object)(uintptr_t)ptr;
+        }
+        // Page has bump space — fall through to bump allocation
+        return knl_bump_from_page(c, pidx, need);
+    }
+
+    // Allocate a fresh page
+    pidx = knl_ensure_page(c, need);
+    if (pidx == KNL_PAGE_NULL) return NULL;
+    return knl_bump_from_page(c, pidx, need);
+}
+
+static void kernel_free(sc_kernel_ctrl_s *c, object ptr) {
+    if (!c || !ptr) return;
+    addr address = (addr)(uintptr_t)ptr;
+    uint16_t pidx = knl_skip_find_containing(c, address);
+    if (pidx == KNL_PAGE_NULL) return;  // large alloc or invalid ptr — ignore
+    knl_page_node_s *pg = knl_page_at(c, pidx);
+
+    // BST search O(log n) instead of linear scan
+    uint16_t nidx = knl_btree_page_search(c, pidx, address);
+    if (nidx == KNL_NODE_NULL) return;
+    knl_node_s *n = knl_node_at(c, nidx);
+    if (n->info & KNL_FREE_FLAG) return;  // double-free guard
+    n->info |= KNL_FREE_FLAG;
+    if (pg->alloc_count > 0) pg->alloc_count--;
+    knl_btree_coalesce(c, pidx, nidx);
+}
+
+static object kernel_realloc(sc_kernel_ctrl_s *c, object ptr, usize new_size) {
+    if (!c) return NULL;
+    if (!ptr) return kernel_alloc(c, new_size);
+    if (new_size == 0) {
+        kernel_free(c, ptr);
         return NULL;
     }
-    for (usize i = 2; i < 16; i++) {
-        scope s = get_scope_table_entry(i);
-        if (s != NULL && s->nodepool_base != ADDR_EMPTY) {
-            if (strncmp(s->name, name, 15) == 0) {
-                return s;
-            }
-        }
-    }
-    return NULL;
+
+    addr address = (addr)(uintptr_t)ptr;
+    uint16_t pidx = knl_skip_find_containing(c, address);
+    if (pidx == KNL_PAGE_NULL) return NULL;
+
+    // BST search O(log n)
+    uint16_t nidx = knl_btree_page_search(c, pidx, address);
+    if (nidx == KNL_NODE_NULL) return NULL;
+    knl_node_s *n = knl_node_at(c, nidx);
+    if (n->info & KNL_FREE_FLAG) return NULL;
+    usize old_size = n->length;
+
+    object new_ptr = kernel_alloc(c, new_size);
+    if (!new_ptr) return NULL;
+    memcpy(new_ptr, ptr, old_size < new_size ? old_size : new_size);
+    kernel_free(c, ptr);
+    return new_ptr;
 }
-#endif
-
-#if 1  // Region: Allocator Interface
-// Static sub-interface instances (v0.2.3)
-static const sc_frame_i frame_iface = {
-    .begin = frame_begin_impl,
-    .end = frame_end_impl,
-    .begin_in = frame_begin_in_impl,
-    .end_in = frame_end_in_impl,
-    .depth = frame_depth_impl,
-    .depth_of = frame_depth_of_impl,
-    .allocated = frame_allocated_impl,
-};
-
-static const sc_arena_i arena_iface = {
-    .create = arena_create_impl,
-    .dispose = arena_dispose_impl,
-    .find = arena_find_impl,
-    .alloc = memory_alloc,
-    .dispose_ptr = arena_dispose_ptr,
-    .frame_begin = frame_begin_in_impl,
-    .frame_end = frame_end_in_impl,
-};
-
-const sc_allocator_i Allocator = {
-    .alloc = memory_alloc,
-    .dispose = memory_dispose,
-    .realloc = slb0_realloc,
-    .Scope =
-        {
-            .current = memory_get_current_scope,
-            .set = memory_set_current_scope,
-            .restore = scope_restore,
-            .config = memory_get_scope_config,
-            .alloc = memory_alloc_for_scope,
-            .dispose = memory_dispose_for_scope,
-        },
-    // Backward-compat frame operations (now R7-aware; v0.2.3)
-    .frame_begin = frame_begin_impl,
-    .frame_end = frame_end_impl,
-    .frame_depth = frame_depth_impl,
-    .frame_allocated = frame_allocated_impl,
-    // Backward-compat arena operations (now R7-aware; v0.2.3)
-    .create_arena = arena_create_impl,
-    .dispose_arena = arena_dispose_impl,
-    // Sub-interfaces (v0.2.3)
-    .Frame = frame_iface,
-    .Arena = arena_iface,
-};
-#endif
-
-#if 1  // Region: Internal Memory Interface
-const sc_memory_i Memory = {
-    .sys0_size = memory_sys0_size,
-    .state = memory_state,
-    .get_first_header = memory_get_first_header,
-    .get_last_footer = memory_get_last_footer,
-    .get_sys0_base = get_sys0_base,
-    .SlabManager = &SlabManager,
-    .get_slots_base = memory_get_slots_base,
-    .get_slots_end = memory_get_slots_end,
-    .get_scope = get_scope_table_entry,
-};
-#endif
-
-#if 1  // Region: Memory System Initialization & Shutdown
-// Helper to initialize scope_table[0] for SYS0
-static void init_scope_table_sys0(void) {
-    scope sys0_entry = &scope_table[0];
-    // Zero the scope entry to ensure clean initialization
-    memset(sys0_entry, 0, sizeof(sc_scope));
-    sys0_entry->scope_id = 0;
-    sys0_entry->policy = SCOPE_POLICY_RECLAIMING;
-    sys0_entry->flags = SCOPE_FLAG_PROTECTED | SCOPE_FLAG_PINNED;
-    // Set flags individually to ensure they stick
-    sys0_entry->flags |= SCOPE_FLAG_PROTECTED;
-    sys0_entry->flags |= SCOPE_FLAG_PINNED;
-    sys0_entry->first_page_off = 0;    // SYS0 page base
-    sys0_entry->current_page_off = 0;  // Only one page
-    sys0_entry->page_count = 1;
-    // Copy name inline
-    sys0_entry->name[0] = 'S';
-    sys0_entry->name[1] = 'Y';
-    sys0_entry->name[2] = 'S';
-    sys0_entry->name[3] = '0';
-    sys0_entry->name[4] = '\0';
-    sys0_entry->nodepool_base = ADDR_EMPTY;
-}
-
-__attribute__((constructor(101))) void init_memory_system(void) {
-    // Verify SYS0_PAGE_SIZE is a power of 2
-    if ((SYS0_PAGE_SIZE & (SYS0_PAGE_SIZE - 1)) != 0) {
-        fprintf(stderr, "FATAL: SYS0_PAGE_SIZE (%d) must be a power of 2\n", SYS0_PAGE_SIZE);
-        abort();
-    }
-
-    // Initialize memory system
-    sys0 = (void *)sys_page;
-
-    // Initialize registers (R0-R7)
-    registers regs = (registers)(sys_page + SYS0_REGISTERS_OFFSET);
-    (void)regs;  // suppress unused variable warning
-    for (int i = 0; i < 8; i++) {
-        registers_set(i, 0);  // All registers start at 0
-    }
-    // Set R0 to SYS0 base address for offset calculations
-    registers_set(REG_SYS0_BASE, (addr)sys_page);
-
-    // Initialize the header at start of data area (offset 256)
-    block_header hdr = (block_header)(sys_page + FIRST_BLOCK_OFFSET);
-    hdr->next_off = 0;  // No next block
-    hdr->size = SYS0_PAGE_SIZE - FIRST_BLOCK_OFFSET - sizeof(sc_blk_header) - sizeof(sc_blk_footer);
-    hdr->flags = BLK_FLAG_FREE | BLK_FLAG_LAST | BLK_FLAG_FOOT;
-
-    // Initialize the footer at end of page
-    block_footer ftr = (block_footer)(sys_page + SYS0_PAGE_SIZE - sizeof(sc_blk_footer));
-    ftr->magic = BLK_END;
-    ftr->size = hdr->size;
-
-    // Allocate scope_table[16] from SYS0 data area FIRST (1024 bytes = 16 * 64)
-    // This must happen before SlabManager.init because slotarray allocation uses Allocator
-    scope_table = (scope)sys0_alloc(SCOPE_TABLE_COUNT * sizeof(sc_scope));
-    if (scope_table == NULL) {
-        fprintf(stderr, "FATAL: Unable to allocate scope table\n");
-        abort();
-    }
-
-    // Initialize scope_table[0] for SYS0
-    init_scope_table_sys0();
-
-    // Set R7 to point to scope_table[0] (SYS0 scope) - must happen before SlabManager.init
-    // because slotarray creation uses Allocator which dispatches through R7
-    // Use direct register write during SYS0 bootstrap (SLB0 switch is direct, no prev chain)
-    registers_set(REG_CURRENT_SCOPE, (addr)&scope_table[0]);
-
-    // Initialize slab slot array in SYS0 reserved region (now R7 is set, Allocator works)
-    if (!SlabManager.init_slab_array()) {
-        fprintf(stderr, "FATAL: Unable to initialize slab slot array\n");
-        abort();
-    }
-
-    // Initialize scope_table[1] for SLB0
-    scope slb0 = &scope_table[1];
-    slb0->scope_id = 1;
-    slb0->policy = SCOPE_POLICY_DYNAMIC;
-    slb0->flags = SCOPE_FLAG_SECURE;  // default SECURE flag
-    // Copy name inline
-    slb0->name[0] = 'S';
-    slb0->name[1] = 'L';
-    slb0->name[2] = 'B';
-    slb0->name[3] = '0';
-    slb0->name[4] = '\0';
-    slb0->nodepool_base = ADDR_EMPTY;
-
-    // Initialize frame fields (v0.2.3: single active frame per scope; prev-chain)
-    slb0->current_frame_idx = NODE_NULL;
-    slb0->current_chunk_idx = NODE_NULL;
-    slb0->frame_counter = 0;
-    slb0->frame_active = false;
-    slb0->prev = NULL;
-
-    // Allocate 16 pages for SLB0 (64KB total)
-    const usize SLB0_PAGE_COUNT = 16;
-    usize slb0_total_size = SLB0_PAGE_COUNT * SYS0_PAGE_SIZE;
-    void *slb0_pages =
-        mmap(NULL, slb0_total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (slb0_pages == MAP_FAILED) {
-        fprintf(stderr, "FATAL: Unable to allocate SLB0 pages\n");
-        abort();
-    }
-
-    // Set scope page pointers
-    slb0->first_page_off = (addr)slb0_pages;
-    slb0->current_page_off = (addr)slb0_pages;  // Start at first page
-    slb0->page_count = SLB0_PAGE_COUNT;
-
-    // Register SLB0 page-0 in slab_table[1]
-    SlabManager.set_slab_entry(1, (addr)slb0_pages);
-
-    // Initialize per-scope NodePool for SLB0 (Phase 7)
-    // NodePool uses mmap() so must happen after SYS0 bootstrap
-    int btree_init_result = nodepool_init(slb0);
-    if (btree_init_result != OK) {
-        fprintf(stderr, "FATAL: Unable to initialize NodePool for SLB0 scope\n");
-        abort();
-    }
-
-    // Populate skip list with initial 16 pages (Phase 7.6 - MTIS Tier 1)
-    for (usize i = 0; i < SLB0_PAGE_COUNT; i++) {
-        addr page_addr = (addr)((sbyte *)slb0_pages + i * SYS0_PAGE_SIZE);
-        uint16_t page_idx = nodepool_alloc_page_node(slb0);
-        if (page_idx == PAGE_NODE_NULL) {
-            fprintf(stderr, "FATAL: Unable to allocate page_node for SLB0 page %zu\n", i);
-            abort();
-        }
-
-        page_node *pn = nodepool_get_page_node(slb0, page_idx);
-        if (pn == NULL) {
-            fprintf(stderr, "FATAL: Unable to get page_node for index %u\n", page_idx);
-            abort();
-        }
-
-        pn->page_base = page_addr;
-        pn->btree_root = NODE_NULL;  // B-tree starts empty (Phase 7.7)
-        pn->block_count = 0;
-        pn->bump_offset = 0;
-        pn->alloc_count = 0;
-        for (int lvl = 0; lvl < SKIP_LIST_MAX_LEVEL; lvl++) {
-            pn->forward[lvl] = PAGE_NODE_NULL;
-        }
-
-        if (skiplist_insert(slb0, page_addr, page_idx) != OK) {
-            fprintf(stderr, "FATAL: Unable to insert page %zu into skip list\n", i);
-            abort();
-        }
-    }
-
-    // B-Tree starts empty (slb0_btree_root = NODE_NULL)
-    // As blocks are freed via slb0_dispose(), they populate the tree
-    // Future allocations will search tree for best-fit blocks
-
-    // Mark bootstrap complete and switch to SLB0 as default scope
-    // WARNING: After this point, sys0_alloc() will abort if called
-    extern bool __bootstrap_complete;
-    __bootstrap_complete = true;
-    // Use direct register write — prev chain starts clean; SLB0->prev stays NULL
-    registers_set(REG_CURRENT_SCOPE, (addr)slb0);
-
-    //
-}
-
-// Bootstrap completion flag (checked by memory_state and sys0_alloc)
-bool __bootstrap_complete = false;
-__attribute__((destructor(101))) void shutdown_memory_system(void) {
-    // Release SLB0 pages back to OS
-    scope slb0 = get_scope_table_entry(1);
-    if (slb0 != NULL && slb0->first_page_off != 0) {
-        const usize SLB0_INITIAL_PAGE_COUNT = 16;
-        void *slb0_initial_base = (void *)slb0->first_page_off;
-        addr initial_end = (addr)slb0_initial_base + SLB0_INITIAL_PAGE_COUNT * SYS0_PAGE_SIZE;
-
-        // Unmap any dynamically allocated pages (beyond initial 16) via skip list
-        if (slb0->page_count > SLB0_INITIAL_PAGE_COUNT && slb0->nodepool_base != ADDR_EMPTY) {
-            nodepool_header *hdr = nodepool_get_header(slb0);
-            if (hdr != NULL) {
-                uint16_t idx = hdr->skip_list_head;
-                while (idx != PAGE_NODE_NULL) {
-                    page_node *pn = nodepool_get_page_node(slb0, idx);
-                    if (pn == NULL) break;
-                    uint16_t next = pn->forward[0];
-                    if (pn->page_base >= initial_end) {
-                        munmap((void *)pn->page_base, SYS0_PAGE_SIZE);
-                    }
-                    idx = next;
-                }
-            }
-        }
-
-        // Unmap initial 16-page block
-        munmap(slb0_initial_base, SLB0_INITIAL_PAGE_COUNT * SYS0_PAGE_SIZE);
-
-        slb0->first_page_off = 0;
-        slb0->current_page_off = 0;
-        slb0->page_count = 0;
-        SlabManager.set_slab_entry(1, ADDR_EMPTY);
-    }
-    // SYS0 is static - no cleanup needed
-    sys0 = NULL;
-}
-#endif

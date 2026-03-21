@@ -1,7 +1,14 @@
 # Sigma.Memory — Backlog
 
-**Version:** 0.2.3  
-**Last Updated:** March 13, 2026  
+> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
+> Items below are from the v0.2.x backlog. After 0.3.0 initial implementation:
+> - Review each item — many are superseded by the Controller Model redesign
+>   (BG-01 `sbyte` warning, BG-02 `RECLAIMING` silent degradation, BG-03 `FIXED` enforcement)
+> - Carry forward any still-applicable items with updated context
+> - Add new 0.3.0 backlog items discovered during implementation
+
+**Version:** 0.2.3 → 0.3.0 rewrite in progress  
+**Last Updated:** March 13, 2026 (v0.2.x items); update after 0.3.0 lands  
 **Maintained By:** SigmaCore Development Team
 
 This document tracks all known gaps, deferred features, and suggested improvements. Items are
@@ -279,38 +286,77 @@ phase before starting the next, recovering contiguous free space for large alloc
 
 ---
 
-### FT-11 — Trusted Subsystem Registration (`Allocator.Trusted`) 🔴 Critical (v0.3.0)
+### FT-11 — Trusted Subsystem Registration (Ring0/Ring1 Model) 🔴 Critical (v0.3.x)
 
-**See:** `docs/plan-v0.3.0.md` for the full design.
+**Branch:** `feature/ft-11-trusted-subsystem`
 
-**Problem:** Sigma.Tasking (and future SigmaCore components) need large, managed, protected
-memory regions that do not consume scope_table slots. The 16-scope ceiling is a showstopper for
-a fiber task scheduler, which may need hundreds of concurrent arenas.
+**Context:** Sigma.Memory is the foundational Ring0 allocator. Trusted Ring1 subsystems (Sigma.Tasking,
+Anvil.Lite, Sigma.IO, Sigma.IRQ, Sigma.Messaging) require dedicated, protected memory regions with
+direct controller access, bypassing the shared SLB0 facade.
+
+**Module system integration:** Each trusted subsystem declares its needs in `sigma_module_t`:
+```c
+static const sigma_module_t tasking_module = {
+    .name         = "sigma.tasking",
+    .role         = SIGMA_ROLE_TRUSTED,
+    .arena_size   = 512 * 1024,     // 512 KB; 0 = system default (256 KB)
+    .arena_policy = POLICY_RECLAIM, // first-fit free list (fiber stacks need arbitrary free)
+    .deps         = tasking_deps,
+    .init         = tasking_module_init,   // receives sc_trusted_cap_t* as ctx
+    .shutdown     = tasking_module_shutdown,
+};
+```
+
+**Register map:**
+```
+R0 = s_sys0_base               (sigma.memory self — set at bootstrap)
+R1 = first trusted slot        (sigma.tasking — sequential assignment)
+R2 = second trusted slot       (anvil.lite — messaging + event bus)
+R3–R6 = future Ring1 slots    (sigma.io, sigma.irq, sigma.msg, ...)
+R7 = SLB0 ctrl                 (immutable — set at bootstrap, never changes)
+```
+
+**`sc_trusted_cap_t`** (full definition in `include/sigma.memory/memory.h`):
+```c
+typedef struct sc_trusted_cap_s {
+    uint8_t         reg_slot;   // R[n] where this module's ctrl is stored (1–6)
+    slab            arena;      // dedicated slab — never touches SLB0
+    sc_ctrl_base_s *ctrl;       // reclaim or bump ctrl over the arena
+    sc_alloc_use_t  alloc_use;  // {alloc, free, realloc} hooks — passed as init(ctx)
+} sc_trusted_cap_t;
+```
+
+**Grant flow** (at `sigma_module_init_all()` time):
+1. sigma.memory `init()` registers grant fn: `sigma_module_set_trusted_grant(trusted_grant_fn)`
+2. `sigma_module_init_all()` (sigma.core) encounters `SIGMA_ROLE_TRUSTED` module
+3. Calls `trusted_grant_fn(mod->name, mod->arena_size, mod->arena_policy)`
+4. sigma.memory: `Allocator.acquire(size)` → create ctrl over slab → stamp `R[next_slot]` → return cap
+5. Module system passes `cap*` as `ctx` to `mod->init(ctx)`
+6. Trusted module stores cap, uses `cap->alloc_use` for all internal allocations
 
 **What it solves:**
-- General registration API for up to 4 trusted subsystems (mapped to free R-slots R3–R6).
-- Each registrant gets an 8 KB SYS control page (pointer stored in their R-slot) and a
-  contiguous protected slab. Slabs grow on demand in `+8 MB` increments.
-- `alloc_arena` / `free_arena` let Tasking carve per-fiber arenas from the slab; Memory handles
-  free-list management and coalescing. Fiber arenas never enter `scope_table`.
-- Three growth policies: `AUTO`, `CALLBACK`, `MANUAL`.
-- Protected flag (`NODE_FLAG_PROTECTED`) on the slab's SLB0 B-tree node prevents accidental
-  disposal from application code.
+- Dedicated slabs that never touch SLB0 fragmentation budget
+- O(1) lookup of any trusted module's arena via its R-slot
+- Module-declared size and controller type (reclaim for fiber stacks, bump for scratch arenas)
+- Forward-compatible with Ring0 OS model: same API, bootstrap-time allocation instead of runtime mmap
+- Up to 6 trusted Ring1 subsystems before Ring2 user modules
 
-**Forward compatibility:** When Sigma.Memory becomes a Sigma.OS Ring 0 component, the control
-page and slab become permanent SYS0-DAT fixtures (bootstrap-time, not runtime mmap). The
-`Allocator.Trusted` API remains unchanged — only the bootstrap mechanism differs.
+**Planned Ring1 subsystems (in expected registration order):**
+| Slot | Module | Role |
+|---|---|---|
+| R1 | sigma.tasking | Fiber task scheduler; needs arbitrary alloc/free for stacks |
+| R2 | anvil.lite | System messaging + event bus; compulsory for all subsystems |
+| R3 | sigma.io | Async I/O, DMA |
+| R4 | sigma.irq | Interrupt routing |
+| R5–6 | reserved | Future Ring1 expansion |
 
 **Scope:**
-- `include/config.h` — 6 new constants
-- `include/internal/memory.h` — `sc_trusted_growth`, `sc_trusted_header`, `sc_slab_free_node`,
-  `NODE_FLAG_PROTECTED`
-- `include/memory.h` — `sc_allocator_trusted_i`, `.Trusted` on `sc_allocator_i`
-- `src/memory.c` — trusted implementation section (~300 lines)
-- `test/unit/test_trusted_registration.c` — TSR-01..05
-- `test/unit/test_trusted_alloc.c` — TAS-01..06
-- `test/unit/test_trusted_growth.c` — TGR-01..06
-- `test/integration/test_trusted_tasking_sim.c` — TSM-01..04
+- `include/sigma.memory/memory.h` — `sc_trusted_cap_t` definition, `memory_trusted_cap(uint8_t slot)` diagnostic
+- `src/memory.c` — `trusted_grant()` impl, `s_next_trusted_slot` counter (starts at 1, max 6)
+- `src/module.c` — register grant fn in `memory_module_init()` after `init_memory_system()`
+- `../sigma.core/src/module.c` — cross-repo: dispatch TRUSTED branch in `sigma_module_init_all()`
+- `../sigma.core/include/sigma.core/module.h` — `arena_size` + `arena_policy` fields in `sigma_module_t` ✅ done
+- `test/unit/test_trusted.c` — TRS-01..07
 
 ---
 
@@ -346,6 +392,140 @@ live simultaneously in any order; `release` does not affect R7 or any other scop
 
 **Effort:** Medium — new struct, new sub-interface (~6 functions), dispatch guards in 3 existing
 functions, shutdown update, 11 TDD tests.
+
+---
+
+### FT-13 — `String.use()`: user-controlled allocation routing for sigma.text 🟠 High
+
+**Status:** Proposal pending Sigma.Core team review.
+
+**Problem:** Every `String.*` and `StringBuilder.*` operation calls `Allocator.alloc/free/realloc`
+unconditionally, always dispatching to SLB0. A caller who acquires a `bump_allocator` for a
+parse pass or render frame gets zero performance benefit for string allocations — they still hit
+the reclaim path. There is no signal that this is happening; the user silently gets the wrong
+allocator.
+
+**What it solves:** Strings are typically the dominant allocation workload in text-processing and
+compile-time tooling. A single `String.use(ctrl)` call makes the fast path explicit, eliminates
+the hidden SLB0 cost for scoped string workloads, and unblocks the natural frame-rollback pattern
+— `String.dispose` becomes a no-op under a bump controller, and `frame_end` reclaims everything
+instantaneously.
+
+**Proposed solution:**
+
+**(A) Sigma.Core — `sc_ctrl_base_s` becomes a vtable base** (`sigma.core/allocator.h`)  
+Add `alloc` and `free` function pointers directly to `sc_ctrl_base_s`:
+
+```c
+struct sc_ctrl_base_s {
+    sc_alloc_policy  policy;
+    slab             backing;
+    usize            struct_size;
+    object         (*alloc)(struct sc_ctrl_base_s *, usize);  // NEW
+    void           (*free) (struct sc_ctrl_base_s *, object); // NEW — no-op for bump
+    void           (*shutdown)(struct sc_ctrl_base_s *);
+};
+```
+
+This turns `sc_ctrl_base_s` into a true polymorphic base. Any pointer to it can dispatch
+alloc/free without knowing the concrete controller type. `allocator_create_bump` wires
+`free` to a no-op; `allocator_create_reclaim` wires both to live implementations.
+
+**(B) Sigma.Core — `sc_string_i` gains a `use` slot** (`sigma.text/include/strings.h`)  
+
+```c
+typedef struct sc_string_i {
+    // ... existing slots ...
+    void (*use)(sc_ctrl_base_s *ctrl);  // NULL → revert to default (SLB0 or malloc)
+} sc_string_i;
+```
+
+**(C) Sigma.Text — internal dispatch** (`src/strings.c`)  
+- `static sc_ctrl_base_s *s_string_ctrl = NULL` — module-level active controller.  
+- Replace every `Allocator.alloc(n)` with `s_string_ctrl->alloc(s_string_ctrl, n)` when
+  non-NULL, else `malloc(n)`.  
+- Replace every `Allocator.free(p)` with `s_string_ctrl->free(s_string_ctrl, p)` when
+  non-NULL, else `free(p)`.  
+- `strings.h` drops `#include <sigma.core/allocator.h>` — depends on `sigma.core/types.h` only.
+
+**(D) Sigma.Memory — inject default controller** (`src/memory.c`, `init_memory_system`)  
+After SLB0 bootstrap: `String.use((sc_ctrl_base_s *)s_slb0_ctrl)`. This makes SLB0 the default
+for all String allocations without sigma.text needing to link against or know about sigma.memory.
+When sigma.memory is not linked, the `malloc`/`free` fallback path applies automatically.
+
+**Drop the shim:** Once (C) lands, sigma.text no longer calls `Allocator.*`. The file
+`sigma.core/allocator.h` is currently installed as a public sigma.core header solely because
+sigma.text depends on it. That dependency is gone. The file becomes sigma.memory's internal
+contract and can be removed from sigma.core's public surface (`/usr/local/include/sigma.core/`).
+sigma.core ships `types.h` + `memory.h` only.
+
+**User story:**
+
+```c
+slab s            = Allocator.acquire(2 * 1024 * 1024);
+bump_allocator ba = Allocator.create_bump(s);
+String.use((sc_ctrl_base_s *)ba);        // all String ops → bump now
+
+frame f = ba->frame_begin(ba);
+string r = String.concat(a, b);          // → bump_ctrl_alloc
+String.dispose(r);                       // → no-op (bump: free is a no-op)
+ba->frame_end(ba, f);                    // entire frame gone instantly
+
+String.use(NULL);                        // revert to default (SLB0 or malloc)
+```
+
+**Effort:** Medium — two new slots on `sc_ctrl_base_s`, one new slot on `sc_string_i`, internal
+dispatch rewrite in `strings.c` (~12 call sites), `init_memory_system` update. No new structs,
+no new files.
+
+**Tests:** Extend TXT-01..04 (Phase 6) to cover bump-routed String allocations, frame rollback
+of String-allocated data, and `String.use(NULL)` restoring the default path.
+
+#### Addendum — External Controller Registration
+
+Domain-specific controllers (e.g. `sc_string_ctrl_s` in sigma.text) live in their own codebase
+but need sigma.memory to own their lifecycle at teardown. Three changes make this work cleanly:
+
+**1. `SC_CTRL_FLAG_EXTERNAL` on `sc_ctrl_base_s`** (sigma.memory `include/internal/memory.h`)
+
+```c
+struct sc_ctrl_base_s {
+    sc_alloc_policy  policy;
+    slab             backing;
+    usize            struct_size;
+    bool             external;   // true → struct not in SLB0; slb0_free skipped on release
+    object         (*alloc)  (struct sc_ctrl_base_s *, usize);
+    void           (*free)   (struct sc_ctrl_base_s *, object);
+    void           (*shutdown)(struct sc_ctrl_base_s *);
+};
+```
+
+**2. `Allocator.register(sc_ctrl_base_s *)` — new slot on `sc_allocator_i`**
+
+Allows any codebase to hand a controller into the registry without going through
+`create_bump`/`create_reclaim`. The caller allocates the struct (typically at the head of its
+own acquired slab), wires `base.shutdown` to its domain-specific teardown, sets
+`base.external = true`, then calls `Allocator.register`. sigma.memory finds the next NULL
+registry slot and stores the pointer — nothing more.
+
+```c
+// sigma.text — sc_string_ctrl_s lives here, sigma.memory never sees the concrete type
+slab             s  = Allocator.acquire(2 * 1024 * 1024);
+string_allocator sa = String.create_controller(s);   // alloc at head of s, wire shutdown
+Allocator.register((sc_ctrl_base_s *)sa);            // hand lifecycle to sigma.memory
+String.use(sa);
+```
+
+**3. `allocator_release` + `cleanup_memory_system` respect the flag**
+
+- `allocator_release`: calls `ctrl->shutdown(ctrl)` + munmaps `ctrl->backing`; calls
+  `slb0_free(ctrl)` **only if** `!ctrl->external`. External structs are owned by their
+  domain — sigma.memory must not free them.
+- `cleanup_memory_system`: walks registry slots 1–31, calls `shutdown` on each non-NULL
+  entry (already in Phase 4 plan), then munmaps SLB0 and SYS0 as today.
+
+This is the minimal surface. sigma.text defines the type and teardown logic. sigma.memory
+registers and drives the lifecycle. Neither knows the other's internals.
 
 ---
 
@@ -492,19 +672,22 @@ the current design.
 
 ---
 
-### AD-04 — `R1`, `R3–R6` registers are reserved but unused 🟢 Low
+### AD-04 — `R1`–`R6` reserved but unassigned 🟢 Low → resolved by FT-11
 
-**File:** `include/internal/memory.h` — `sc_registers`  
-**Problem:** Six of eight registers are reserved. R1 was planned to cache the NodePool base
-(reducing pointer chasing) and R6 for parent scope, but neither was implemented.
+**File:** `include/internal/memory.h` — `sc_registers_s`
+**Status:** By design — intentionally held for Ring1 subsystem registration (FT-11).
 
-**What it solves:** Using R1 for NodePool base cache would eliminate one pointer dereference per
-B-tree operation — measurable in tight allocation loops.
+**Register map (locked):**
+```
+R0 = s_sys0_base (sigma.memory self-pointer — set in bootstrap_sys0)
+R1 = first  Ring1 trusted slot (sigma.tasking)
+R2 = second Ring1 trusted slot (anvil.lite)
+R3–R6 = future Ring1 slots (sigma.io, sigma.irq, sigma.msg, TBD)
+R7 = SLB0 ctrl (immutable — set in bootstrap_slb0, never changes)
+```
 
-**Context:** R1/R3-R6 are reserved for allocation by **external Sigma.X subsystems**
-(Sigma.Tasking and others). They are intentionally unclaimed by `sigma.memory` to leave room
-for the broader ecosystem. The R1 NodePool-base cache optimization remains valid but must not
-be assigned until the register map across Sigma.X modules is formally defined.
+Slots R1–R6 are assigned sequentially as trusted modules register. A trusted module's
+ctrl pointer is stored in its assigned R-slot for O(1) cross-module lookup.
 
 ---
 
@@ -605,8 +788,8 @@ there is demonstrated demand.
 | Count | Priority | Items |
 |-------|----------|-------|
 | 1 | 🔴 Critical | FT-11 |
-| 10 | 🟠 High | BG-01, BG-02, FT-02, FT-03, FT-09, TG-01, TG-03, TG-04, TG-06, AD-05 |
+| 11 | 🟠 High | BG-01, BG-02, FT-02, FT-03, FT-09, FT-13, TG-01, TG-03, TG-04, TG-06, AD-05 |
 | 6 | 🟡 Medium | BG-03, BG-04, FT-05, FT-08, TG-02, TG-05 |
-| 8 | 🟢 Low | FT-06, FT-07, FT-10, AD-01, AD-02, AD-04, DG-01, DG-02 |
-| 3 | ✅ Resolved | FT-04, AD-03, FT-01 (superseded → FT-11) |
+| 7 | 🟢 Low | FT-06, FT-07, FT-10, AD-01, AD-02, DG-01, DG-02 |
+| 5 | ✅ Resolved | FT-04, AD-03, FT-01 (superseded→FT-11), AD-04 (by design, see FT-11), is_ready (wired) |
 | 5 | ⏸️ Deferred | CD-01 through CD-05 |
