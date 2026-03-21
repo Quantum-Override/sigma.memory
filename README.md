@@ -1,7 +1,7 @@
 # Sigma.Memory
 
 **Version:** 0.3.0 (in development)  
-**Rewrite of:** [`../sigma.mem_0.2/`](../sigma.mem_0.2/)  
+**Rewrite of:** [`../archive/sigma.mem_0.2/`](../archive/sigma.mem_0.2/)  
 **Design:** [`docs/design.md`](docs/design.md)
 
 ---
@@ -40,4 +40,4 @@ See [`BUILDING.md`](BUILDING.md).
 
 ## History
 
-Design evolution through v0.2.x is documented in [`../sigma.mem_0.2/docs/design-chronicle.md`](../sigma.mem_0.2/docs/design-chronicle.md).
+Design evolution through v0.2.x is documented in [`../archive/sigma.mem_0.2/docs/design-chronicle.md`](../archive/sigma.mem_0.2/docs/design-chronicle.md).

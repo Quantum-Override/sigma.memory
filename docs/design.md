@@ -579,16 +579,46 @@ Tasks:
 - [ ] Implement `reclaim_ctrl_shutdown` (MTIS teardown + munmap slab)
 - [ ] Wire SLB0 bootstrap to use `sc_reclaim_ctrl_s` instance (R7 ← SLB0)
 
+### Phase 3B — KernelController (MTIS)
+**Rationale:** SLB0 is the analog to system `malloc` for Sigma.Memory and the future Ring0 kernel
+memory primitive. The first-fit free list in `sc_reclaim_ctrl_s` is correct for user controllers
+but insufficient for kernel use: variable-size, high-churn, multi-page workloads at Ring0 scale
+require the two-tier MTIS (skip-list PageList + B-tree NodePool) from sigma.mem_0.2.
+`sc_kernel_ctrl_s` is a distinct type — not in the registry, baked into SYS0 DAT, backed by a
+2 MB mmap (matching x86 huge-page boundary for eventual Ring0 portability). SLB0
+(`slb0_alloc/free/realloc`) delegates to the kernel controller, not to `sc_reclaim_ctrl_s`.
+
+**Tests:** KNL-01..10: kernel ctrl in SYS0 DAT, 2 MB backing slab, basic alloc, alloc(0)→NULL,
+free + reuse, multi-alloc (hundreds), large alloc (>4 KB), nodepool initialized, B-tree tracking,
+coalesce (A+B alloc, A+B free → single coalesced block)
+
+Tasks:
+- [ ] Add `POLICY_KERNEL = 3` to `sc_alloc_policy` in `sigma.core/allocator.h`
+- [ ] Define MTIS structs (`sc_node`, `page_node`, `nodepool_header`) in `internal/memory.h`
+- [ ] Define `sc_kernel_ctrl_s` in `internal/memory.h` (not public — never user-facing)
+- [ ] Add SYS0 DAT constants for kernel ctrl layout after SLB0 in `internal/memory.h`
+- [ ] Add `MEM_STATE_KERNEL_READY` flag
+- [ ] Implement `bootstrap_kernel()` — mmap 2 MB arena + nodepool mmap, init ctrl
+- [ ] Port MTIS helpers from sigma.mem_0.2 as per-controller static functions (no global state)
+- [ ] Implement `kernel_alloc`, `kernel_free`, `kernel_realloc` (MTIS-backed)
+- [ ] Rewire `slb0_alloc/free/realloc` to delegate to kernel controller
+- [ ] Add `memory_kernel_ctrl()` diagnostic for tests
+- [ ] Update `cleanup_memory_system` to munmap nodepool + kernel arena + SLB0
+
 ### Phase 4 — Registry + create_bump / create_reclaim
 **Tests:** REG-01..08: create_bump / create_reclaim allocates from SLB0, registered in table,
 Allocator.release NULLs slot, SLB0 reuse after release, 31 controllers (near-max),
 32nd controller (max), 33rd (assert/NULL)
 
 Tasks:
+- [ ] Add `bool external` flag to `sc_ctrl_base_s` (internal/memory.h)
 - [ ] Embed `sc_ctrl_registry_s` in SYS0 at bootstrap
 - [ ] Implement `allocator_create_bump(slab s)` — slb0_alloc + vtable init + register
 - [ ] Implement `allocator_create_reclaim(slab s)` — slb0_alloc + vtable init + register
-- [ ] Implement `allocator_release(sc_ctrl_base_s *ctrl)` — shutdown + deregister + slb0_dispose
+- [ ] Implement `allocator_release(sc_ctrl_base_s *ctrl)` — shutdown + deregister + slb0_dispose (skip slb0_dispose if `ctrl->external`)
+- [ ] Implement `allocator_register(sc_ctrl_base_s *ctrl)` — external controller registration (sets `external=true`, finds NULL slot, stores pointer)
+- [ ] Update `cleanup_memory_system` — walk registry slots 1–31, call `shutdown` on each non-NULL entry before SLB0/SYS0 munmap
+- [ ] Add `register` slot to `sc_allocator_i` in `sigma.core/allocator.h`
 
 ### Phase 5 — Public Facade + Drop-in Compat
 **Tests:** FAC-01..06: Allocator.alloc/free/realloc dispatch correctly to SLB0,
@@ -608,6 +638,10 @@ Tasks:
 - [ ] `sigma.text cbuild` clean
 - [ ] `sigma.text rtest unit` all passing
 - [ ] Confirm no sigma.memory symbols in sigma.text.o (`nm` check)
+- [ ] **Pending FT-13 (Sigma.Core approval):** Add `alloc`/`free` slots to `sc_ctrl_base_s`;
+  add `String.use(sc_ctrl_base_s *)` to `sc_string_i`; rewrite `strings.c` dispatch; call
+  `String.use(slb0_ctrl)` in `init_memory_system`; remove `sigma.core/allocator.h` from
+  sigma.core public surface once all dependents migrated. See backlog FT-13.
 
 ---
 

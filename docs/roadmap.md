@@ -15,7 +15,7 @@ to `sigma.core`; makes sigma.text genuinely independent of sigma.memory at link 
 
 > **Note:** The previously planned v0.3.0 "Trusted Subsystem Registration" design (Sigma.Tasking
 > fiber arena integration) is deferred. That design is archived in
-> [`../sigma.mem_0.2/docs/plan-v0.3.0.md`](../../sigma.mem_0.2/docs/plan-v0.3.0.md).
+> [`../archive/sigma.mem_0.2/docs/plan-v0.3.0.md`](../../archive/sigma.mem_0.2/docs/plan-v0.3.0.md).
 > The Controller Model resolves the foundational problems that needed to be fixed first; Tasking
 > integration will be re-evaluated once 0.3.0 is stable.
 

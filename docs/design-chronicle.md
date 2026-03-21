@@ -1,17 +1,12 @@
 # Sigma.Memory - Design Evolution
 
-> **⚠ v0.3.0 NOTE — UPDATE NEEDED**  
-> Chapters 1–10 below document the v0.2.x journey (January–March 2026).  
-> After the 0.3.0 Controller Model rewrite is complete, add **Chapter 11: The Controller Model Pivot** covering:
-> the R7 disposal bug, why scope-as-mutable-global was fragile, the decision to fix R7 to SLB0,
-> separate vtable structs per policy, and SLB0 as the registry allocator.  
-> Reference: [`docs/design.md`](design.md) for the full 0.3.0 specification.
+> **v0.3.0 complete. Chapter 11 added below.**
 
 **A Living Chronicle of Architectural Discovery**
 
 **Authors:** SigmaCore Development Team  
 **Journey Began:** January 2026  
-**Current Milestone:** v0.2.5 → v0.3.0 Controller Model (March 2026)  
+**Current Milestone:** v0.3.0 complete; v0.3.x Ring0/Ring1 model in progress  
 **Philosophy:** "Good enough to ship" is the enemy of innovation
 
 ---
@@ -43,7 +38,9 @@ If you're reading this to learn how to build a memory allocator, pay attention t
 8. [Chapter 8: Frame Support - Chunked Bump Allocators (v0.2.1)](#chapter-8-frame-support---chunked-bump-allocators-v021)
 9. [Chapter 9: Realloc, Dynamic Page Release & Bug Archaeology (v0.2.3)](#chapter-9-realloc-dynamic-page-release--bug-archaeology-v023)
 10. [Chapter 10: Janky Instability — NodePool B-tree Index Corruption (v0.2.4)](#chapter-10-the-janky-instability--nodepool-b-tree-index-corruption-v024)
-11. [Epilogue: Why This Matters](#epilogue-why-this-matters)
+11. [Chapter 11: The Controller Model Pivot (v0.3.0)](#chapter-11-the-controller-model-pivot)
+12. [Chapter 12: Ring0/Ring1 — The Module Trust Hierarchy (v0.3.x)](#chapter-12-ring0ring1--the-module-trust-hierarchy)
+13. [Epilogue: Why This Matters](#epilogue-why-this-matters)
 
 ---
 
@@ -2249,6 +2246,162 @@ But more importantly:
 - **We learned** how to question assumptions
 - **We proved** that "impossible" often means "uncomfortable"
 - **We built** something that doesn't compromise
+
+---
+
+## Chapter 11: The Controller Model Pivot (v0.3.0)
+
+**Date:** March 2026  
+**Context:** v0.2.x worked. Tests passed. But the architecture had a fatal flaw hiding in plain sight.
+
+### The Problem with Mutable Global State
+
+The v0.2.x model used R7 as a mutable stack pointer — the "current scope" register, pushed and
+popped as arenas were created and released. This seemed elegant: one register, one pointer,
+O(1) scope switching. Then we found the disposal bug.
+
+When sigma.memory was initialised *before* sigma.test in the module constructor order, the first
+thing sigma.test did was push a new scope onto R7 for its tracking arenas. When sigma.memory
+booted second, it reset R7 to its own SLB0 base — silently clobbering the sigma.test scope
+chain. No error. No crash. Just wrong allocations.
+
+The root cause: **a mutable global register is a shared mutation hazard.** Any module that
+interacts with the memory system at init time can corrupt another module's scope chain by simply
+running in a different constructor order.
+
+### The Pivot: Fix R7, Introduce Controllers
+
+The fix seems simple in retrospect but required abandoning the entire v0.2.x mental model:
+
+> **R7 is fixed at bootstrap. It never changes. Ever.**
+
+R7 always points to SLB0 — the primary first-fit reclaim controller. All public allocation
+(`Allocator.alloc/free/realloc`) routes through SLB0. Period.
+
+Scopes became **controllers**: typed structs with vtable function pointers, backed by slabs
+acquired from SLB0, living independently of R7. Each controller knows its own policy
+(bump, reclaim, kernel) through its vtable, not through a shared global register.
+
+This is the "Controller Model":
+
+```
+SYS0 (8 KB, mmap)
+  ├─ Registers R0–R7   (R0=self, R7=SLB0, R1–R6 reserved for Ring1)
+  ├─ Reserved pad      (128 bytes, future Ring1 slots)
+  ├─ Ctrl Registry     (32 slots, 264 bytes)
+  └─ SYS0-DAT           (SLB0 ctrl + kernel ctrl structs)
+
+SLB0 (64 KB, first-fit reclaim — the allocator's allocator)
+Kernel slab (2 MB, MTIS skip-list + B-tree for user allocations)
+Trusted slabs (per Ring1 module, variable size, reclaim or bump)
+```
+
+### What Changed in Code
+
+- Replaced `sc_scope_s` (arena with embedded R7 link) with `sc_bump_ctrl_s`, `sc_reclaim_ctrl_s`,
+  `sc_kernel_ctrl_s` — each a self-contained controller with its own vtable
+- `Allocator.alloc` → always SLB0's first-fit reclaim path
+- `Allocator.create_bump/create_reclaim` → caller-owned controllers backed by their own slabs
+- All 9 test suites rewritten (60 tests, 60 green, 0 valgrind errors at v0.3.0 ship)
+- Phase 6: `sigma_module_t` descriptor in sigma.core; sigma.memory registers via constructor
+  as `SIGMA_ROLE_SYSTEM` with `SIGMA_ALLOC_SYSTEM` — no dependency on its own allocator to init
+
+---
+
+## Chapter 12: Ring0/Ring1 — The Module Trust Hierarchy (v0.3.x)
+
+**Date:** March 21, 2026  
+**Context:** v0.3.0 is shipped. Now sigma.tasking is on the horizon — and it needs
+memory in a fundamentally different way than user-level modules.
+
+### The Problem with Treating All Modules Equally
+
+The v0.3.0 module system (`SIGMA_ROLE_SYSTEM` / `SIGMA_ROLE_USER`) works well for modules
+that just need malloc/free. But sigma.tasking is a fiber task scheduler. It needs:
+
+- **Hundreds of fiber stacks** allocated and freed independently (not frame-based)
+- **Zero contention with user code** — a buggy user allocation must not exhaust tasking's arena
+- **Direct controller access** — bypass the SLB0 facade for performance-critical hot paths
+- **Protection** — user code must not be able to `release` the tasking slab
+
+A user-role module that calls `Allocator.alloc()` competes with sigma.tasking on SLB0's
+first-fit free list. That's not acceptable for a Ring1 system component.
+
+### The Ring Model
+
+```
+Ring 0 — sigma.memory
+    The allocator itself. Bootstraps from mmap with no upstream dependency.
+    SIGMA_ROLE_SYSTEM. init(NULL). Runs first in topo order.
+    R0 = self. R7 = SLB0 ctrl.
+
+Ring 1 — Trusted subsystems
+    Pre-allocated dedicated slabs. Module declares size and controller type
+    in sigma_module_t. sigma.memory grants an sc_trusted_cap_t at init time.
+    Never touches SLB0. Ctrl pointer stored in R1–R6 for O(1) lookup.
+
+    Planned Ring1 roster:
+      R1 — sigma.tasking   (fiber stacks; POLICY_RECLAIM, ~512 KB default)
+      R2 — anvil.lite      (system messaging + event bus; compulsory for all subsystems)
+      R3 — sigma.io        (async I/O, DMA)
+      R4 — sigma.irq       (interrupt routing)
+      R5–6 — reserved for future Ring1 expansion
+
+Ring 2 — User modules
+    sigma.text, sigma.collections, sigma.test, application code.
+    SIGMA_ROLE_USER. Allocates through the SLB0 facade.
+    May receive a dedicated arena (SIGMA_ALLOC_ARENA) but not a trusted cap.
+```
+
+### The `sc_trusted_cap_t` — The Key to the Kingdom
+
+When `sigma_module_init_all()` encounters a `SIGMA_ROLE_TRUSTED` module, it calls
+sigma.memory's registered grant function with the module's declared `arena_size` and
+`arena_policy`. The grant function:
+
+1. Calls `Allocator.acquire(size)` — maps a fresh slab, **not from SLB0**
+2. Creates a controller (reclaim or bump) over that slab
+3. Stamps the ctrl pointer into `sys0_regs()->R[next_slot]`
+4. Returns a `sc_trusted_cap_t` containing the slot, slab, ctrl, and ready-to-use `alloc_use` hooks
+
+The trusted module receives `cap*` as its `init(ctx)`. It stores the cap in static state
+and routes all internal allocations through `cap->alloc_use` — completely off SLB0.
+
+### Why Modules Declare Their Own Arena Requirements
+
+Early design considered a fixed system constant (`TRUSTED_SLAB_SIZE = 256 KB`). We rejected
+this for the same reason the old v0.2.x scope model was rejected: one size does not fit all.
+
+- sigma.tasking may need 512 KB for a busy fiber scheduler
+- anvil.lite may need 128 KB for a lightweight event queue
+- A future sigma.irq likely needs only 32 KB
+
+By putting `arena_size` and `arena_policy` in `sigma_module_t`, each trusted module is
+self-documenting: its memory contract lives next to its name and deps. Zero vs default (0 = 256 KB)
+falls back gracefully. `POLICY_KERNEL` is explicitly reserved for sigma.memory itself —
+a trusted module requesting it receives `ERR`.
+
+### Anvil.Lite: The Compulsory Ring1 Backbone
+
+Anvil.Lite is currently in planning. Its role:
+- System messaging and event bus for all Ring1 subsystems
+- Compulsory dependency: sigma.tasking, sigma.io, sigma.irq *all* depend on it
+- Assigned R2 by convention (R1 = tasking; tasking may send events before anvil.lite inits — TBD)
+- Will require a reclaim-policy arena for message object lifetime management
+
+The detail of whether tasking or anvil.lite initialises first (and whether tasking can buffer
+events before the bus is live) is a design question deferred until anvil.lite is specified.
+
+### What v0.3.x Adds to Code
+
+| Change | File | Status |
+|--------|------|---------|
+| `arena_size` + `arena_policy` fields in `sigma_module_t` | `sigma.core/module.h` | ✅ done |
+| `sc_trusted_cap_t` definition | `sigma.memory/memory.h` | 🔧 in progress |
+| `trusted_grant()` + `s_next_trusted_slot` | `src/memory.c` | 🔧 in progress |
+| Register grant fn in `memory_module_init()` | `src/module.c` | 🔧 in progress |
+| TRUSTED dispatch in `sigma_module_init_all()` | `sigma.core/src/module.c` | 🔧 in progress |
+| TRS-01..07 test suite | `test/unit/test_trusted.c` | 🔧 in progress |
 
 ---
 
