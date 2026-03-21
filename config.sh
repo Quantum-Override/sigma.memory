@@ -13,7 +13,7 @@ ASAN_ENABLED=false
 ASAN_OPTIONS="detect_leaks=1:detect_stack_use_after_return=1:detect_invalid_pointer_pairs=1"
 
 # Base compiler flags
-BASE_CFLAGS="-Wall -Wextra -g -fPIC -std=$STD -I./include -I/usr/local/include"
+BASE_CFLAGS="-Wall -Wextra -g -fPIC -std=$STD -I./include -I../sigma.core/package/include -I/usr/local/include"
 
 if [ "$ASAN_ENABLED" = true ]; then
     BASE_CFLAGS="$BASE_CFLAGS -fsanitize=address -fsanitize=undefined"
@@ -22,7 +22,7 @@ fi
 CFLAGS="$BASE_CFLAGS"
 TST_CFLAGS="$CFLAGS -DTSTDBG"
 LDFLAGS="-shared"
-TST_LDFLAGS="/usr/local/packages/sigma.test.o /usr/local/packages/sigma.text.o -Wl,--wrap=malloc,--wrap=free"
+TST_LDFLAGS="./build/sigma.test.o /usr/local/packages/sigma.core.module.o /usr/local/packages/sigma.core.text.o /usr/local/packages/sigma.core.utils.o /usr/local/packages/sigma.core.o -Wl,--allow-multiple-definition"
 
 SRC_DIR=src
 BUILD_DIR=build
@@ -32,12 +32,12 @@ TEST_DIR=test
 TST_BUILD_DIR="$BUILD_DIR/test"
 LIB_NAME="sigma.memory"
 
-# sigma.core provides sc_allocator_i + slab type definitions
-# sigma.collections for skip list / b-tree support
-REQUIRES=("sigma.core" "sigma.collections")
+# sigma.core provides headers only (no .o package needed — memory.c defines Allocator)
+# sigma.collections added in Phase 3 for MTIS skip-list / B-tree internals
+REQUIRES=()
 
 declare -A PACKAGES=(
-    ["memory"]="sigma.memory | memory"
+    ["memory"]="sigma.memory | memory module"
 )
 
 declare -A BUILD_TARGETS=(
@@ -50,3 +50,15 @@ declare -A BUILD_TARGETS=(
     ["root"]="show_project_info"
 )
 
+# Test set configurations — one entry per test/unit/test_<name>.c file.
+# Phase 0: RED state — tests exist but memory.c not yet written.
+# Phases 1–5 will add entries as each suite goes green.
+declare -A TEST_CONFIGS=(
+    ["bootstrap"]="standard"  # BST-01..06  Phase 1
+    ["slab"]="standard"       # SLB-01..04  Phase 1
+    ["bump"]="standard"       # BC-01..12   Phase 2
+    ["reclaim"]="standard"    # RC-01..14   Phase 3
+    ["kernel"]="standard"     # KNL-01..10  Phase 3B
+    ["registry"]="standard"   # REG-01..08  Phase 4
+    ["facade"]="standard"     # FAC-01..06  Phase 5
+)

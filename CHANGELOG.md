@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to Sigma.Memory are documented here.  
-**Previous history (v0.1.0 – v0.2.5):** see [`../sigma.mem_0.2/CHANGELOG.md`](../sigma.mem_0.2/CHANGELOG.md)
+**Previous history (v0.1.0 – v0.2.5):** see [`../archive/sigma.mem_0.2/CHANGELOG.md`](../archive/sigma.mem_0.2/CHANGELOG.md)
 
 ---
 
