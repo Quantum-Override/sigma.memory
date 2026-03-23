@@ -1,22 +1,28 @@
 # Changelog
 
-All notable changes to Sigma.Memory are documented here.  
-**Previous history (v0.1.0 – v0.2.5):** see [`../archive/sigma.mem_0.2/CHANGELOG.md`](../archive/sigma.mem_0.2/CHANGELOG.md)
+## [0.3.0] — TBD
 
----
+### Added
+- SIGMA_ROLE_TRUSTED_APP = 3: trusted-app grant pool (FT-14) — 8 slots, separate from Ring1 R1–6
+- trusted_app_grant(name, size, policy) — per-slot shims A1–A8, TRUSTED_APP_SLOT_MAX 8u
+- memory_trusted_app_cap(slot) and memory_trusted_app_reset() diagnostic utilities (FT-14)
+- frame_begin/frame_end added to sc_alloc_use_t (FT-15) — wired for both BUMP and RECLAIM policies
 
-## [0.3.0] - TBD
-
-**Controller Model Rewrite**
-
-Architecture fully redesigned. See [`docs/design.md`](docs/design.md) for the complete specification.
-
-- `slab` type: raw mmap-backed memory region, no policy embedded
-- `bump_allocator` (`sc_bump_ctrl_s *`): pure cursor bump, O(1) alloc, `reset`, frame snapshots
-- `reclaim_allocator` (`sc_reclaim_ctrl_s *`): MTIS-backed, individual `free`, frame sequence-tag sweep
-- Controller structs allocated from SLB0 (no separate bump pool in SYS0)
-- Controller registry: `sc_ctrl_registry_s` embedded in SYS0; tracks up to `SC_MAX_CONTROLLERS` controller pointers
+### Changed
+- Architecture fully redesigned — controller model rewrite; see docs/design.md
+- slab type: raw mmap-backed memory region, no policy embedded
+- bump_allocator (sc_bump_ctrl_s*): pure cursor bump, O(1) alloc, reset, frame snapshots
+- reclaim_allocator (sc_reclaim_ctrl_s*): MTIS-backed, individual free, frame sequence-tag sweep
+- Controller structs allocated from SLB0 — no separate bump pool in SYS0
+- Controller registry: sc_ctrl_registry_s embedded in SYS0; tracks up to SC_MAX_CONTROLLERS pointers
 - R7 fixed permanently to SLB0 — scope stack removed
-- `sc_allocator_i` interface definition moved to `sigma.core`
-- Removed: `Allocator.Scope`, `Allocator.Arena`, `Allocator.Resource`, `Allocator.promote`, frame depth globals
-- Retained: `Allocator.alloc / free / realloc` facade (dispatches to SLB0) for drop-in compat
+- sc_allocator_i interface definition moved to sigma.core
+
+### Removed
+- Allocator.Scope, Allocator.Arena, Allocator.Resource, Allocator.promote, frame depth globals
+
+### Breaking Changes
+- sc_allocator_i interface definition moved to sigma.core — update includes in all dependents
+- Allocator.Scope/Arena/Resource/promote removed — no replacement; use controller API directly
+
+**Migration:** Update all #include paths for sc_allocator_i to <sigma.core/allocator.h>. Replace Allocator.Scope/Arena/Resource usage with sc_bump_ctrl_s or sc_reclaim_ctrl_s controller API. Allocator.alloc/free/realloc facade retained for drop-in compat — no immediate change required for simple allocations.

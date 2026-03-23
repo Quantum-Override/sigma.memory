@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "internal/memory.h"
-#include "sigma.memory/memory.h"
+#include "memory.h"
 
 #define PASS(msg) printf("  PASS: %s\n", msg)
 #define FAIL(msg)                \

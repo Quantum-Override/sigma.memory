@@ -14,7 +14,7 @@
  */
 
 #include "internal/memory.h"
-#include "sigma.memory/memory.h"
+#include "memory.h"
 // ----
 #include <sigma.test/sigtest.h>
 

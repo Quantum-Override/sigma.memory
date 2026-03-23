@@ -112,6 +112,7 @@ static void reclaim_free_block(struct sc_reclaim_ctrl_s *c, rc_block_hdr_s *hdr)
 
 // trusted subsystem helpers
 sc_trusted_cap_t *trusted_grant(const char *name, usize size, sc_alloc_policy policy);
+sc_trusted_cap_t *trusted_app_grant(const char *name, usize size, sc_alloc_policy policy);
 
 // ── Private struct definitions ────────────────────────────────────────────
 typedef struct sc_registers_s {
@@ -140,6 +141,10 @@ static uint8_t s_next_slab_id = 2u;  // 1 = SLB0, 2+ = user slabs
 // Trusted subsystem caps (R1–R6); index = slot - 1
 static uint8_t s_next_trusted_slot = TRUSTED_SLOT_MIN;
 static sc_trusted_cap_t *s_trusted_caps[TRUSTED_SLOT_MAX];  // [0]=R1 .. [5]=R6
+
+// Trusted-app caps (FT-14); parallel pool, independent of R1–R6
+static uint8_t s_next_trusted_app_slot = TRUSTED_APP_SLOT_MIN;
+static sc_trusted_cap_t *s_trusted_app_caps[TRUSTED_APP_SLOT_MAX];  // [0]=A1 .. [7]=A8
 
 // ── SYS0 region accessors ─────────────────────────────────────────────────
 static inline sc_registers_s *sys0_regs(void) {
@@ -499,6 +504,11 @@ void cleanup_memory_system(void) {
         s_trusted_caps[i] = NULL;
     }
     s_next_trusted_slot = TRUSTED_SLOT_MIN;
+    // Reset trusted-app subsystem state (FT-14)
+    for (uint8_t i = 0; i < TRUSTED_APP_SLOT_MAX; i++) {
+        s_trusted_app_caps[i] = NULL;
+    }
+    s_next_trusted_app_slot = TRUSTED_APP_SLOT_MIN;
 }
 
 // ── Diagnostics ───────────────────────────────────────────────────────────
@@ -554,6 +564,26 @@ void memory_trusted_reset(void) {
         s_trusted_caps[i] = NULL;
     }
     s_next_trusted_slot = TRUSTED_SLOT_MIN;
+}
+
+sc_trusted_cap_t *memory_trusted_app_cap(uint8_t slot) {
+    if (slot < TRUSTED_APP_SLOT_MIN || slot > TRUSTED_APP_SLOT_MAX) return NULL;
+    return s_trusted_app_caps[slot - 1];
+}
+
+void memory_trusted_app_reset(void) {
+    if (s_sys0_base == ADDR_EMPTY) return;
+    for (uint8_t i = 0; i < TRUSTED_APP_SLOT_MAX; i++) {
+        sc_trusted_cap_t *cap = s_trusted_app_caps[i];
+        if (cap) {
+            if (cap->arena && cap->arena->base) {
+                munmap(cap->arena->base, cap->arena->size);
+                cap->arena->base = NULL;
+            }
+        }
+        s_trusted_app_caps[i] = NULL;
+    }
+    s_next_trusted_app_slot = TRUSTED_APP_SLOT_MIN;
 }
 
 void slb_release_raw(slab s) {
@@ -621,6 +651,8 @@ TRUSTED_SHIM(6)
 typedef object (*alloc_fn)(usize);
 typedef void (*free_fn)(object);
 typedef object (*realloc_fn)(object, usize);
+typedef frame (*frame_begin_fn)(void);
+typedef void (*frame_end_fn)(frame);
 
 static const alloc_fn s_trusted_alloc_shims[TRUSTED_SLOT_MAX] = {
     trusted_r1_alloc, trusted_r2_alloc, trusted_r3_alloc,
@@ -721,6 +753,187 @@ fail_ctrl:
 fail_slab:
     slb0_free(s);
 fail_mem:
+    munmap(mem, arena_size);
+    return NULL;
+}
+
+// ── Trusted-app subsystem grant (FT-14) ───────────────────────────────────
+// Parallel pool to trusted_grant — used by SIGMA_ROLE_TRUSTED_APP modules.
+// App slots are numbered 1–TRUSTED_APP_SLOT_MAX, independent of R1–R6.
+// App-tier arenas are NOT stamped into sys0_regs()->R[] (those are Ring1 only).
+
+static object trusted_app_slot_alloc(uint8_t slot, usize size) {
+    sc_trusted_cap_t *cap = s_trusted_app_caps[slot - 1];
+    if (!cap || !cap->ctrl) return NULL;
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    return r->alloc(r, size);
+}
+
+static void trusted_app_slot_free(uint8_t slot, object ptr) {
+    sc_trusted_cap_t *cap = s_trusted_app_caps[slot - 1];
+    if (!cap || !cap->ctrl || !ptr) return;
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    r->free(r, ptr);
+}
+
+static object trusted_app_slot_realloc(uint8_t slot, object ptr, usize new_size) {
+    sc_trusted_cap_t *cap = s_trusted_app_caps[slot - 1];
+    if (!cap || !cap->ctrl) return NULL;
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    return r->realloc(r, ptr, new_size);
+}
+
+static frame trusted_app_slot_frame_begin(uint8_t slot) {
+    sc_trusted_cap_t *cap = s_trusted_app_caps[slot - 1];
+    if (!cap || !cap->ctrl) return FRAME_NULL;
+    if (cap->ctrl->policy == POLICY_BUMP) {
+        struct sc_bump_ctrl_s *b = (struct sc_bump_ctrl_s *)cap->ctrl;
+        return b->frame_begin(b);
+    }
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    return r->frame_begin(r);
+}
+
+static void trusted_app_slot_frame_end(uint8_t slot, frame f) {
+    sc_trusted_cap_t *cap = s_trusted_app_caps[slot - 1];
+    if (!cap || !cap->ctrl) return;
+    if (cap->ctrl->policy == POLICY_BUMP) {
+        struct sc_bump_ctrl_s *b = (struct sc_bump_ctrl_s *)cap->ctrl;
+        b->frame_end(b, f);
+        return;
+    }
+    struct sc_reclaim_ctrl_s *r = (struct sc_reclaim_ctrl_s *)cap->ctrl;
+    r->frame_end(r, f);
+}
+
+#define TRUSTED_APP_SHIM(N)                                   \
+    static object trusted_a##N##_alloc(usize s) {             \
+        return trusted_app_slot_alloc(N, s);                  \
+    }                                                         \
+    static void trusted_a##N##_free(object p) {               \
+        trusted_app_slot_free(N, p);                          \
+    }                                                         \
+    static object trusted_a##N##_realloc(object p, usize s) { \
+        return trusted_app_slot_realloc(N, p, s);             \
+    }                                                         \
+    static frame trusted_a##N##_frame_begin(void) {           \
+        return trusted_app_slot_frame_begin(N);               \
+    }                                                         \
+    static void trusted_a##N##_frame_end(frame f) {           \
+        trusted_app_slot_frame_end(N, f);                     \
+    }
+
+TRUSTED_APP_SHIM(1)
+TRUSTED_APP_SHIM(2)
+TRUSTED_APP_SHIM(3)
+TRUSTED_APP_SHIM(4)
+TRUSTED_APP_SHIM(5)
+TRUSTED_APP_SHIM(6)
+TRUSTED_APP_SHIM(7)
+TRUSTED_APP_SHIM(8)
+
+static const alloc_fn s_trusted_app_alloc_shims[TRUSTED_APP_SLOT_MAX] = {
+    trusted_a1_alloc, trusted_a2_alloc, trusted_a3_alloc, trusted_a4_alloc,
+    trusted_a5_alloc, trusted_a6_alloc, trusted_a7_alloc, trusted_a8_alloc};
+static const free_fn s_trusted_app_free_shims[TRUSTED_APP_SLOT_MAX] = {
+    trusted_a1_free, trusted_a2_free, trusted_a3_free, trusted_a4_free,
+    trusted_a5_free, trusted_a6_free, trusted_a7_free, trusted_a8_free};
+static const realloc_fn s_trusted_app_realloc_shims[TRUSTED_APP_SLOT_MAX] = {
+    trusted_a1_realloc, trusted_a2_realloc, trusted_a3_realloc, trusted_a4_realloc,
+    trusted_a5_realloc, trusted_a6_realloc, trusted_a7_realloc, trusted_a8_realloc};
+static const frame_begin_fn s_trusted_app_frame_begin_shims[TRUSTED_APP_SLOT_MAX] = {
+    trusted_a1_frame_begin, trusted_a2_frame_begin, trusted_a3_frame_begin, trusted_a4_frame_begin,
+    trusted_a5_frame_begin, trusted_a6_frame_begin, trusted_a7_frame_begin, trusted_a8_frame_begin};
+static const frame_end_fn s_trusted_app_frame_end_shims[TRUSTED_APP_SLOT_MAX] = {
+    trusted_a1_frame_end, trusted_a2_frame_end, trusted_a3_frame_end, trusted_a4_frame_end,
+    trusted_a5_frame_end, trusted_a6_frame_end, trusted_a7_frame_end, trusted_a8_frame_end};
+
+sc_trusted_cap_t *trusted_app_grant(const char *name, usize size, sc_alloc_policy policy) {
+    (void)name;
+    if (s_next_trusted_app_slot > TRUSTED_APP_SLOT_MAX) return NULL;
+    if (policy == POLICY_KERNEL) return NULL;
+    if (policy == 0) policy = POLICY_RECLAIM;
+
+    usize arena_size = (size == 0) ? TRUSTED_SLAB_DEFAULT : size;
+    uint8_t slot = s_next_trusted_app_slot;
+
+    void *mem = mmap(NULL, arena_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) return NULL;
+
+    slab s = slb0_alloc(sizeof(sc_slab_s));
+    if (!s) goto app_fail_mem;
+    s->base = mem;
+    s->size = arena_size;
+    s->slab_id = s_next_slab_id++;
+
+    sc_ctrl_base_s *ctrl = NULL;
+    if (policy == POLICY_BUMP) {
+        struct sc_bump_ctrl_s *b = slb0_alloc(sizeof(struct sc_bump_ctrl_s));
+        if (!b) goto app_fail_slab;
+        b->base.policy = POLICY_BUMP;
+        b->base.backing = s;
+        b->base.struct_size = sizeof(struct sc_bump_ctrl_s);
+        b->base.external = true;
+        b->base.shutdown = bump_ctrl_shutdown;
+        b->cursor = 0;
+        b->capacity = arena_size;
+        b->frame_depth = 0;
+        b->alloc = bump_ctrl_alloc;
+        b->reset = bump_ctrl_reset;
+        b->frame_begin = bump_ctrl_frame_begin;
+        b->frame_end = bump_ctrl_frame_end;
+        ctrl = (sc_ctrl_base_s *)b;
+    } else {
+        struct sc_reclaim_ctrl_s *r = slb0_alloc(sizeof(struct sc_reclaim_ctrl_s));
+        if (!r) goto app_fail_slab;
+        r->base.policy = POLICY_RECLAIM;
+        r->base.backing = s;
+        r->base.struct_size = sizeof(struct sc_reclaim_ctrl_s);
+        r->base.external = true;
+        r->base.shutdown = reclaim_ctrl_shutdown;
+        r->bump = 0;
+        r->capacity = arena_size;
+        r->free_head = NULL;
+        r->seq = 0;
+        r->frame_seq = 0;
+        r->alloc = reclaim_ctrl_alloc;
+        r->free = reclaim_ctrl_free;
+        r->realloc = reclaim_ctrl_realloc;
+        r->frame_begin = reclaim_ctrl_frame_begin;
+        r->frame_end = reclaim_ctrl_frame_end;
+        ctrl = (sc_ctrl_base_s *)r;
+    }
+
+    sc_trusted_cap_t *cap = slb0_alloc(sizeof(sc_trusted_cap_t));
+    if (!cap) goto app_fail_ctrl;
+
+    cap->reg_slot = slot;
+    cap->arena = s;
+    cap->ctrl = ctrl;
+
+    uint8_t idx = (uint8_t)(slot - 1);
+    if (policy == POLICY_RECLAIM) {
+        cap->alloc_use.alloc = s_trusted_app_alloc_shims[idx];
+        cap->alloc_use.release = s_trusted_app_free_shims[idx];
+        cap->alloc_use.resize = s_trusted_app_realloc_shims[idx];
+    } else {
+        cap->alloc_use.alloc = NULL;
+        cap->alloc_use.release = NULL;
+        cap->alloc_use.resize = NULL;
+    }
+    cap->alloc_use.frame_begin = s_trusted_app_frame_begin_shims[idx];
+    cap->alloc_use.frame_end = s_trusted_app_frame_end_shims[idx];
+
+    // App-tier arenas are NOT stamped into sys0_regs()->R[]; those are Ring1 only.
+    s_trusted_app_caps[idx] = cap;
+    s_next_trusted_app_slot++;
+    return cap;
+
+app_fail_ctrl:
+    slb0_free(ctrl);
+app_fail_slab:
+    slb0_free(s);
+app_fail_mem:
     munmap(mem, arena_size);
     return NULL;
 }
