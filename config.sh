@@ -28,7 +28,7 @@ SRC_DIR=src
 BUILD_DIR=build
 BIN_DIR=bin
 LIB_DIR="$BIN_DIR/lib"
-TEST_DIR=test
+TEST_DIR=test/unit
 TST_BUILD_DIR="$BUILD_DIR/test"
 LIB_NAME="sigma.memory"
 
@@ -61,4 +61,7 @@ declare -A TEST_CONFIGS=(
     ["kernel"]="standard"     # KNL-01..10  Phase 3B
     ["registry"]="standard"   # REG-01..08  Phase 4
     ["facade"]="standard"     # FAC-01..06  Phase 5
+    ["trusted"]="standard"    # TRS-01..07  Phase 6
+    ["trusted_app"]="standard" # FTA-01..04  FT-14
+    ["alloc_direct"]="standard" # direct alloc tests
 )

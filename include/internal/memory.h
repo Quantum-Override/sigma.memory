@@ -10,7 +10,7 @@
 
 #include <sigma.core/allocator.h>
 #include <sigma.core/types.h>
-#include "sigma.memory/memory.h"
+#include "../memory.h"
 
 // ── Alignment ──────────────────────────────────────────────────────────────
 #define kAlign 16
@@ -133,6 +133,9 @@ addr memory_r7(void);
 // ── Trusted subsystem grant (defined in memory.c, used by module.c) ────────────
 sc_trusted_cap_t *trusted_grant(const char *name, usize size, sc_alloc_policy policy);
 
+// ── Trusted-app subsystem grant (FT-14) — separate pool, not Ring1 ───────────
+sc_trusted_cap_t *trusted_app_grant(const char *name, usize size, sc_alloc_policy policy);
+
 // ── Module lifecycle hooks (called by src/module.c via sigma.core module system) ──
 void init_memory_system(void);
 void cleanup_memory_system(void);
@@ -141,3 +144,8 @@ void cleanup_memory_system(void);
 // Unmaps trusted arenas and resets the slot counter.
 // Does NOT touch SLB0. Safe to call mid-session (sigma.test allocations remain valid).
 void memory_trusted_reset(void);
+
+// ── Test utility — Trusted-app subsystem reset (FT-14) ──────────────────────────
+// Unmaps trusted-app arenas and resets the app slot counter.
+// Does NOT touch R1–R6 or SLB0.
+void memory_trusted_app_reset(void);

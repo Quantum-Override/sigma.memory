@@ -55,6 +55,7 @@ static int memory_module_init(void *ctx) {
     (void)ctx;
     init_memory_system();
     sigma_module_set_trusted_grant(trusted_grant);
+    sigma_module_set_trusted_app_grant(trusted_app_grant);
     return OK;
 }
 

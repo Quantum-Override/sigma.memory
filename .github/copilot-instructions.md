@@ -279,3 +279,22 @@ static void complex_operation_cleanup(object param1) {
 - `test/test_memory.c` - Testing patterns
 - `Makefile` - Build system
 - `README.md` - Usage examples
+
+## Changelog
+
+`changelog.anvl` is the **source of truth** for this project's release history. `CHANGELOG.md` is generated output — do not edit it directly.
+
+To record a release:
+1. Add a new version block to `changelog.anvl` (e.g. `v0_3_1 @[date="YYYY-MM-DD"] { }`)
+2. Populate `added[]`, `changed[]`, `fixed[]`, `removed[]` arrays as applicable — include empty arrays for unused categories
+3. If the release has breaking changes, add `breaking @[breaking=true] := []` and a `migration_notes` string
+4. Run `python3 ../tools/clog.py sigma.memory` to regenerate `CHANGELOG.md`
+
+The `changelog` path for this project is registered in `q-or/repo.anvl`.
+
+## Agent Boundaries
+
+- **Source edits**: Only modify files within this project's directory tree. Do NOT edit source files in other projects.
+- **Reading**: May read files in sibling projects for context (headers, interfaces, documentation).
+- **Tickets**: Every ticket (`TICKET-*`) must include a `## Test Cases` section with concrete inputs and expected outputs or assertions.
+- **Session continuity**: At session start, check `q-or/wip.anvl`. If an active WIP block is present, read it and announce where work left off (`next_action`) before proceeding.

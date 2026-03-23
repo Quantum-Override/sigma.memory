@@ -316,7 +316,7 @@ R3–R6 = future Ring1 slots    (sigma.io, sigma.irq, sigma.msg, ...)
 R7 = SLB0 ctrl                 (immutable — set at bootstrap, never changes)
 ```
 
-**`sc_trusted_cap_t`** (full definition in `include/sigma.memory/memory.h`):
+**`sc_trusted_cap_t`** (full definition in `include/memory.h`):
 ```c
 typedef struct sc_trusted_cap_s {
     uint8_t         reg_slot;   // R[n] where this module's ctrl is stored (1–6)
@@ -351,7 +351,7 @@ typedef struct sc_trusted_cap_s {
 | R5–6 | reserved | Future Ring1 expansion |
 
 **Scope:**
-- `include/sigma.memory/memory.h` — `sc_trusted_cap_t` definition, `memory_trusted_cap(uint8_t slot)` diagnostic
+- `include/memory.h` — `sc_trusted_cap_t` definition, `memory_trusted_cap(uint8_t slot)` diagnostic
 - `src/memory.c` — `trusted_grant()` impl, `s_next_trusted_slot` counter (starts at 1, max 6)
 - `src/module.c` — register grant fn in `memory_module_init()` after `init_memory_system()`
 - `../sigma.core/src/module.c` — cross-repo: dispatch TRUSTED branch in `sigma_module_init_all()`
@@ -529,7 +529,12 @@ registers and drives the lifecycle. Neither knows the other's internals.
 
 ---
 
-### FT-14 — `SIGMA_ROLE_TRUSTED_APP`: Trusted Application Registration 🔴 Critical (v0.3.x)
+### ~~FT-14~~ — `SIGMA_ROLE_TRUSTED_APP`: Trusted Application Registration ✅ Implemented (v0.3.x)
+
+**Resolution:** FTA-01..04 pass. `SIGMA_ROLE_TRUSTED_APP = 3` dispatches through
+`sigma_module_set_trusted_app_grant`; app-tier caps draw from a separate 8-slot pool and
+never touch R1–R6. `TRUSTED_APP_SLOT_MAX 8u` constant and `memory_trusted_app_cap()`/
+`memory_trusted_app_reset()` test utilities in place. Sigma.core FR-2603-sigma-core-002 closed.
 
 **Context:** FT-11 introduced Ring1 trusted subsystems (R1–R6) for first-party system-level
 modules (sigma.tasking, anvil.lite, sigma.io, etc.). These slots are reserved for infrastructure.
@@ -584,7 +589,16 @@ void sigma_module_set_trusted_app_grant(sc_trusted_app_grant_fn fn);
 
 ---
 
-### FT-15 — Frame operations on `sc_alloc_use_t` 🟠 High (v0.3.x)
+### ~~FT-15~~ — Frame operations on `sc_alloc_use_t` ✅ Implemented (v0.3.x)
+
+**Resolution:** `frame_begin`/`frame_end` added to `sc_alloc_use_t` (sigma.core FR-2603-sigma-core-003
+closed). `trusted_app_grant` wires both fields unconditionally — both POLICY_BUMP and
+POLICY_RECLAIM controllers support frames, so the original "NULL for RECLAIM" plan was
+revised: all app-tier caps expose full frame support. Per-slot shims
+(`trusted_a1_frame_begin`..`trusted_a8_frame_begin` etc.) dispatch through
+`trusted_app_slot_frame_begin/end` which branch on `ctrl->policy` at call time.
+
+**Follow-up:** FTA-05..07 (frame tests on `alloc_use`) not yet written — tracked as TG-07.
 
 **Context:** `sc_alloc_use_t` today exposes only `alloc`/`release`/`resize`. Both the bump and
 reclaim controllers already support `frame_begin`/`frame_end` internally (vtable on
@@ -735,6 +749,21 @@ regression where `begin_in` on an arena silently operates on the wrong scope.
 **Fix:** Create `test/unit/test_arena_frames.c` with cases: frame on arena allocates from arena,
 `end_in` bulk-disposes correctly, arena remains valid and allocatable after frame disposal,
 `begin_in` on two different arenas independently track frame state.
+
+---
+
+### TG-07 — `alloc_use` frame tests (FTA-05..07) not yet written 🟠 High
+
+**Context:** FT-15 wired `frame_begin`/`frame_end` into `sc_alloc_use_t` and all app-tier caps.
+The implementation is complete and tested indirectly via the controller-level tests, but no test
+exercises the frame API through the `alloc_use` surface directly.
+
+**Fix:** Extend `test/unit/test_trusted_app.c` with:
+- FTA-05: `frame_begin` on bump-backed `alloc_use` returns non-`FRAME_NULL`
+- FTA-06: `frame_end` reclaims all allocs in frame (cursor returns to pre-frame position)
+- FTA-07: `frame_begin`/`frame_end` on reclaim-backed `alloc_use` — seq-tag bulk free
+
+**Effort:** Low — all infrastructure exists; tests are pure assertion wiring.
 
 ---
 
@@ -898,9 +927,9 @@ there is demonstrated demand.
 
 | Count | Priority | Items |
 |-------|----------|-------|
-| 2 | 🔴 Critical | FT-11 ✅, FT-14 |
-| 12 | 🟠 High | BG-01, BG-02, FT-02, FT-03, FT-09, FT-13, FT-15, TG-01, TG-03, TG-04, TG-06, AD-05 |
+| 1 | 🔴 Critical | FT-11 ✅ |
+| 11 | 🟠 High | BG-01, BG-02, FT-02, FT-03, FT-09, FT-13, TG-01, TG-03, TG-04, TG-06, AD-05 |
 | 6 | 🟡 Medium | BG-03, BG-04, FT-05, FT-08, TG-02, TG-05 |
 | 7 | 🟢 Low | FT-06, FT-07, FT-10, AD-01, AD-02, DG-01, DG-02 |
-| 5 | ✅ Resolved | FT-04, AD-03, FT-01 (superseded→FT-11), AD-04 (by design, see FT-11), is_ready (wired) |
+| 7 | ✅ Resolved | FT-04, AD-03, FT-01 (superseded→FT-11), AD-04 (by design, see FT-11), is_ready (wired), FT-14, FT-15 |
 | 5 | ⏸️ Deferred | CD-01 through CD-05 |
