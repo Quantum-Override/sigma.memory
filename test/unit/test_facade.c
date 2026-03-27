@@ -5,7 +5,7 @@
  *
  * Verifies the Allocator public facade — drop-in compat surface for v0.2.x callers:
  *   FAC-01: Allocator.alloc dispatches to SLB0 — returns non-NULL, memory writable
- *   FAC-02: Allocator.free — alloc then free, stable (valgrind catches leaks)
+ *   FAC-02: Allocator.dispose — alloc then dispose, stable (valgrind catches leaks)
  *   FAC-03: Allocator.realloc(NULL, n) — NULL-ptr first arg acts as alloc
  *   FAC-04: Allocator.realloc(ptr, n2) — data preserved on grow
  *   FAC-05: Allocator.acquire(size) — returns slab with correct geometry
@@ -37,20 +37,20 @@ void test_fac01_alloc_returns_non_null(void) {
     memset(p, 0xAB, 128);
     Assert.isTrue(((uint8_t *)p)[0] == 0xAB, "FAC-01: written byte must be readable back");
 
-    Allocator.free(p);
+    Allocator.dispose(p);
 }
 
-// FAC-02: Allocator.free — allocate, write, free; must not crash; no leaks under valgrind
+// FAC-02: Allocator.dispose — allocate, write, dispose; must not crash; no leaks under valgrind
 void test_fac02_free_stable(void) {
     object p = Allocator.alloc(256);
-    Assert.isNotNull(p, "FAC-02: alloc must succeed before free");
+    Assert.isNotNull(p, "FAC-02: alloc must succeed before dispose");
 
     memset(p, 0x00, 256);
-    Allocator.free(p);
+    Allocator.dispose(p);
 
     // If we get here without a crash, the test passes.
     // Valgrind validates zero leaks.
-    Assert.isTrue(true, "FAC-02: free completed without crash");
+    Assert.isTrue(true, "FAC-02: dispose completed without crash");
 }
 
 // FAC-03: Allocator.realloc(NULL, n) — NULL first arg acts as alloc
@@ -61,7 +61,7 @@ void test_fac03_realloc_null_is_alloc(void) {
     memset(p, 0x55, 64);
     Assert.isTrue(((uint8_t *)p)[0] == 0x55, "FAC-03: returned memory must be writable");
 
-    Allocator.free(p);
+    Allocator.dispose(p);
 }
 
 // FAC-04: Allocator.realloc(ptr, n2) — first n bytes of data preserved after grow
@@ -85,7 +85,7 @@ void test_fac04_realloc_preserves_data(void) {
     }
     Assert.isTrue(preserved, "FAC-04: first %zu bytes must be preserved after grow", initial);
 
-    Allocator.free(p2);
+    Allocator.dispose(p2);
 }
 
 // FAC-05: Allocator.acquire(size) — returns non-NULL slab with correct geometry

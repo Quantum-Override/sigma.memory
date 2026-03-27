@@ -729,6 +729,7 @@ sc_trusted_cap_t *trusted_grant(const char *name, usize size, sc_alloc_policy po
     cap->reg_slot = slot;
     cap->arena = s;
     cap->ctrl = ctrl;
+    cap->alloc_use.ctrl = ctrl;
 
     uint8_t idx = (uint8_t)(slot - 1);
     if (policy == POLICY_RECLAIM) {
@@ -910,6 +911,7 @@ sc_trusted_cap_t *trusted_app_grant(const char *name, usize size, sc_alloc_polic
     cap->reg_slot = slot;
     cap->arena = s;
     cap->ctrl = ctrl;
+    cap->alloc_use.ctrl = ctrl;
 
     uint8_t idx = (uint8_t)(slot - 1);
     if (policy == POLICY_RECLAIM) {
@@ -1142,7 +1144,7 @@ const sc_allocator_i Allocator = {
     .create_custom = allocator_create_custom,
     .register_ctrl = allocator_register_ctrl,
     .alloc = slb0_alloc,
-    .free = slb0_free,
+    .dispose = slb0_free,
     .realloc = slb0_realloc,
     .is_ready = allocator_is_ready,
 };

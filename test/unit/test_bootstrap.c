@@ -82,7 +82,7 @@ void test_bst05_r7_equals_registry_slot0(void) {
 void test_bst06_alloc_free_roundtrip(void) {
     object p = Allocator.alloc(64);
     Assert.isNotNull(p, "BST-06: Allocator.alloc(64) must return non-NULL");
-    Allocator.free(p);
+    Allocator.dispose(p);
 }
 
 #endif

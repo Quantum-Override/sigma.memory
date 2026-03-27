@@ -54,8 +54,8 @@ int main(void) {
         } else {
             FAIL("memory write/read mismatch");
         }
-        Allocator.free(p);
-        PASS("Allocator.free() did not crash");
+        Allocator.dispose(p);
+        PASS("Allocator.dispose() did not crash");
     }
 
     /* 6. Shutdown via module system */
