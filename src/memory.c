@@ -37,9 +37,9 @@
 void init_memory_system(void);
 void cleanup_memory_system(void);
 static bool allocator_is_ready(void);
-static object slb0_alloc(usize size);
-static void slb0_free(object ptr);
-static object slb0_realloc(object ptr, usize new_size);
+object slb0_alloc(usize size);
+void slb0_free(object ptr);
+object slb0_realloc(object ptr, usize new_size);
 static slab allocator_acquire(usize size);
 static void allocator_release(sc_ctrl_base_s *ctrl);
 static bump_allocator allocator_create_bump(usize size);
@@ -172,17 +172,19 @@ static inline sc_slab_s *sys0_kernel_slab(void) {
 }
 
 // ── SLB0 — delegates to kernel controller (MTIS) ──────────────────────────
-static object slb0_alloc(usize size) {
+// Exported for weak linkage: sigma.core's Application.get_allocator() falls back to these
+// symbols when no custom allocator is configured via Application.set_allocator().
+object slb0_alloc(usize size) {
     sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
     return k->alloc(k, size);
 }
 
-static void slb0_free(object ptr) {
+void slb0_free(object ptr) {
     sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
     k->free(k, ptr);
 }
 
-static object slb0_realloc(object ptr, usize new_size) {
+object slb0_realloc(object ptr, usize new_size) {
     sc_kernel_ctrl_s *k = sys0_kernel_ctrl();
     return k->realloc(k, ptr, new_size);
 }
