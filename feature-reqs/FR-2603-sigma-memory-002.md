@@ -7,10 +7,10 @@
 **Updated:** 2026-03-29  
 **Status:** in-progress  
 **Tags:** sigma-memory, allocator, application, delegation, phase-2, orchestration, BR-2603-q-or-001  
-**Depends on:** FR-2603-sigma-core-004 (Application.set_allocator API), FR-2603-sigma-memory-001 (Allocator.dispose rename), sigma.core v1.2.0 (Module.set_bootstrap)  
+**Depends on:** FR-2603-sigma-core-004 (Application.set_allocator API), FR-2603-sigma-memory-001 (Allocator.dispose rename), FR-2603-sigma-core-007 (Module.set_bootstrap)  
 **Blocks:** FR-2603-sigma-collections-003 (collections alloc_use removal)  
 
-**Update 2026-03-29:** sigma.core v1.2.0 added `Module.set_bootstrap()` API, resolving application initialization timing requirements. Applications can now configure allocators before ecosystem modules initialize.  
+**Update 2026-03-29:** sigma.core v1.2.0 added `Module.set_bootstrap()` API (FR-2603-sigma-core-007), resolving application initialization timing requirements. Applications can now configure allocators before ecosystem modules initialize.  
 
 ---
 

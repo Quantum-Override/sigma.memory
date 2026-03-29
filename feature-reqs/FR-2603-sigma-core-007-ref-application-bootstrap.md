@@ -1,10 +1,13 @@
-# Feature Request: Application Bootstrap Hook
+# FR-2603-sigma-core-007: Application Bootstrap Hook (Reference)
 
+**ID**: FR-2603-sigma-core-007 (sigma.core)  
 **Project**: sigma.core  
 **Requested by**: sigma.memory team  
 **Date**: 2026-03-28  
 **Status**: RESOLVED (sigma.core v1.2.0)  
-**Resolution**: Implemented via `Module.set_bootstrap()` API - see "Using The Module System.md"  
+**Resolution**: Implemented via `Module.set_bootstrap()` API - see sigma.core documentation "Using The Module System.md"
+
+**Reference**: This is a cross-reference document. The actual FR lives in sigma.core repository at `feature-reqs/FR-2603-sigma-core-007.md`
 
 ---
 
