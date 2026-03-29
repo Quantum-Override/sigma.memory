@@ -5,7 +5,7 @@
 **Owner:** sigma.memory  
 **Filed:** 2026-03-27  
 **Updated:** 2026-03-29  
-**Status:** complete  
+**Status:** closed  
 **Tags:** sigma-memory, allocator, application, delegation, phase-2, orchestration, BR-2603-q-or-001  
 **Depends on:** FR-2603-sigma-core-004 (Application.set_allocator API), FR-2603-sigma-memory-001 (Allocator.dispose rename), FR-2603-sigma-core-007 (Module.set_bootstrap)  
 **Blocks:** FR-2603-sigma-collections-003 (collections alloc_use removal)  
