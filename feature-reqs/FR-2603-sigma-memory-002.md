@@ -5,12 +5,19 @@
 **Owner:** sigma.memory  
 **Filed:** 2026-03-27  
 **Updated:** 2026-03-29  
-**Status:** in-progress  
+**Status:** complete  
 **Tags:** sigma-memory, allocator, application, delegation, phase-2, orchestration, BR-2603-q-or-001  
 **Depends on:** FR-2603-sigma-core-004 (Application.set_allocator API), FR-2603-sigma-memory-001 (Allocator.dispose rename), FR-2603-sigma-core-007 (Module.set_bootstrap)  
 **Blocks:** FR-2603-sigma-collections-003 (collections alloc_use removal)  
 
 **Update 2026-03-29:** sigma.core v1.2.0 added `Module.set_bootstrap()` API (FR-2603-sigma-core-007), resolving application initialization timing requirements. Applications can now configure allocators before ecosystem modules initialize.  
+
+**Implementation Complete (2026-03-29):**
+- **Phase 1:** Exported `slb0_alloc/free/realloc` symbols for weak linkage fallback (commit 34d2266)
+- **Phase 1:** Created `test_app_delegate.c` validating bootstrap pattern (9/9 assertions, valgrind clean)
+- **Phase 2:** Added `allocator_delegate_alloc/dispose/realloc` wrappers routing through `Application.get_allocator()`
+- **Phase 2:** Updated `Allocator` interface struct assignments to use delegation wrappers
+- **Validation:** All facade tests pass (6/6), valgrind clean (0 errors, 0 leaks)
 
 ---
 

@@ -30,6 +30,7 @@
 #include "memory.h"
 #include "internal/memory.h"
 
+#include <sigma.core/application.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -46,6 +47,9 @@ static bump_allocator allocator_create_bump(usize size);
 static reclaim_allocator allocator_create_reclaim(usize size);
 static sc_ctrl_base_s *allocator_create_custom(usize size, ctrl_factory_fn factory);
 static void allocator_register_ctrl(sc_ctrl_base_s *ctrl);
+static object allocator_delegate_alloc(usize size);
+static void allocator_delegate_dispose(object ptr);
+static object allocator_delegate_realloc(object ptr, usize new_size);
 
 // ── Forward declarations — helpers ────────────────────────────────────────
 static void bootstrap_sys0(void);
@@ -1137,6 +1141,45 @@ static void reclaim_ctrl_shutdown(sc_ctrl_base_s *base) {
     base->backing->base = NULL;
 }
 
+// ── Allocator delegation wrappers ──────────────────────────────────────────
+/**
+ * @brief Delegate allocation to Application.get_allocator()
+ * @param size Number of bytes to allocate
+ * @return Pointer to allocated memory, or NULL on failure
+ *
+ * Routes Allocator.alloc() calls through Application.get_allocator() so
+ * applications can control allocation via Module.set_bootstrap() hook.
+ * Falls back to SLB0 weak linkage if no custom allocator configured.
+ */
+static object allocator_delegate_alloc(usize size) {
+    sc_alloc_use_t *alloc = Application.get_allocator();
+    return alloc->alloc(size);
+}
+
+/**
+ * @brief Delegate disposal to Application.get_allocator()
+ * @param ptr Pointer to free
+ *
+ * Routes Allocator.dispose() calls through Application.get_allocator().
+ */
+static void allocator_delegate_dispose(object ptr) {
+    sc_alloc_use_t *alloc = Application.get_allocator();
+    alloc->release(ptr);
+}
+
+/**
+ * @brief Delegate reallocation to Application.get_allocator()
+ * @param ptr Existing allocation to resize
+ * @param new_size New size in bytes
+ * @return Pointer to resized memory, or NULL on failure
+ *
+ * Routes Allocator.realloc() calls through Application.get_allocator().
+ */
+static object allocator_delegate_realloc(object ptr, usize new_size) {
+    sc_alloc_use_t *alloc = Application.get_allocator();
+    return alloc->resize(ptr, new_size);
+}
+
 // ── Allocator interface instance ──────────────────────────────────────────
 const sc_allocator_i Allocator = {
     .acquire = allocator_acquire,
@@ -1145,9 +1188,9 @@ const sc_allocator_i Allocator = {
     .create_reclaim = allocator_create_reclaim,
     .create_custom = allocator_create_custom,
     .register_ctrl = allocator_register_ctrl,
-    .alloc = slb0_alloc,
-    .dispose = slb0_free,
-    .realloc = slb0_realloc,
+    .alloc = allocator_delegate_alloc,
+    .dispose = allocator_delegate_dispose,
+    .realloc = allocator_delegate_realloc,
     .is_ready = allocator_is_ready,
 };
 
