@@ -17,6 +17,7 @@
 - Controller registry: sc_ctrl_registry_s embedded in SYS0; tracks up to SC_MAX_CONTROLLERS pointers
 - R7 fixed permanently to SLB0 — scope stack removed
 - sc_allocator_i interface definition moved to sigma.core
+- Allocator.alloc/dispose/realloc now delegate through Application.get_allocator() (FR-2603-sigma-memory-002) — enables application-wide custom allocator injection for test frameworks and production use cases
 
 ### Removed
 - Allocator.Scope, Allocator.Arena, Allocator.Resource, Allocator.promote, frame depth globals
