@@ -10,9 +10,7 @@
 // Previous history (v0.1.0 – v0.2.5): see archive/sigma.mem_0.2/CHANGELOG.md
 // ============================================================
 
-changelog {
-
-  v0_3_0 @[date="TBD"] {
+v0_3_0 @[date="TBD"] {
     added := [
       "SIGMA_ROLE_TRUSTED_APP = 3: trusted-app grant pool (FT-14) — 8 slots, separate from Ring1 R1–6",
       "trusted_app_grant(name, size, policy) — per-slot shims A1–A8, TRUSTED_APP_SLOT_MAX 8u",
@@ -38,6 +36,4 @@ changelog {
       "Allocator.Scope/Arena/Resource/promote removed — no replacement; use controller API directly"
     ]
     migration_notes := "Update all #include paths for sc_allocator_i to <sigma.core/allocator.h>. Replace Allocator.Scope/Arena/Resource usage with sc_bump_ctrl_s or sc_reclaim_ctrl_s controller API. Allocator.alloc/free/realloc facade retained for drop-in compat — no immediate change required for simple allocations."
-  }
-
 }
